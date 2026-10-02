@@ -1,0 +1,11 @@
+# Local analyst state and runtime files
+csf-analyst.settings.json
+state/
+__pycache__/
+*.pyc
+
+# Generated material and local dependencies
+node_modules/
+backups/
+tmp/
+reference-data/NIST/batches/

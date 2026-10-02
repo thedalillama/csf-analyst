@@ -1,0 +1,5 @@
+{
+  "RuntimeRoot": ".",
+  "DataRoot": ".",
+  "AnalystStateDbPath": "./state/csf-analyst.db"
+}
