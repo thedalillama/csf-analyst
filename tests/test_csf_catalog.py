@@ -2,7 +2,7 @@ import unittest
 
 import csf_catalog
 from csf_guidance import PLAIN_ENGLISH_GUIDANCE_EN_US, PRODUCT_EXAMPLES_EN_US
-from csf_information_flows import INFORMATION_ITEMS, INFORMATION_SOURCES, INFORMATION_USES
+from csf_information_flows import INFORMATION_FLOW_CURRENT_ITEMS, INFORMATION_FLOW_EDGES
 from csf_capability_dependencies import CAPABILITY_DEPENDENCIES
 from csf_profile import SUBCATEGORY_PROFILE_METADATA_EN_US
 import csf_analyst_ui as ui
@@ -51,22 +51,19 @@ class OfficialCsfCatalogTests(unittest.TestCase):
             for category in function["categories"]
             for subcategory in category["subcategories"]
         }
-        information_ids = {item["information_id"] for item in INFORMATION_ITEMS}
-        self.assertEqual(len(INFORMATION_ITEMS), len(information_ids))
-        self.assertTrue({item["information_id"] for item in INFORMATION_SOURCES}.issubset(information_ids))
-        self.assertTrue({item["information_id"] for item in INFORMATION_USES}.issubset(information_ids))
-        source_ids = {item["source_subcategory_id"] for item in INFORMATION_SOURCES}
-        external_source_ids = {item for item in source_ids if item.startswith("External:")}
-        self.assertEqual(
-            {
-                "External: legal, regulatory, and contractual sources",
-                "External: operational measurement and evidence records",
-                "External: vulnerability disclosure sources",
-            },
-            external_source_ids,
+        information_ids = {item["information_id"] for item in INFORMATION_FLOW_CURRENT_ITEMS}
+        self.assertEqual(len(INFORMATION_FLOW_CURRENT_ITEMS), len(information_ids))
+        self.assertTrue({item["information_id"] for item in INFORMATION_FLOW_EDGES}.issubset(information_ids))
+        self.assertTrue(
+            {item["consumer_subcategory_id"] for item in INFORMATION_FLOW_EDGES}.issubset(catalog_ids)
         )
-        self.assertTrue((source_ids - external_source_ids).issubset(catalog_ids))
-        self.assertTrue({item["consumer_subcategory_id"] for item in INFORMATION_USES}.issubset(catalog_ids))
+        self.assertTrue(
+            {
+                item["source_subcategory_id"]
+                for item in INFORMATION_FLOW_EDGES
+                if item["source_kind"] == "subcategory"
+            }.issubset(catalog_ids)
+        )
         self.assertTrue({item["prerequisite_subcategory_id"] for item in CAPABILITY_DEPENDENCIES}.issubset(catalog_ids))
         self.assertTrue({item["dependent_subcategory_id"] for item in CAPABILITY_DEPENDENCIES}.issubset(catalog_ids))
 

@@ -36,8 +36,11 @@ implementation determinations.
 
 ## Current implementation limits
 
-- The UI supports profile-scoped actions and evidence, but not a separate
-  portfolio-level plan object for grouping and prioritizing actions.
+- Named Plans, action assignment, and action priority are persisted and
+  auditable per Organizational Profile. The Plans page creates and lists
+  named Plans, while the Action form assigns a Plan and priority. Unassigned
+  work remains in a virtual **Unplanned** bucket rather than a synthetic Plan
+  record.
 - Evidence reference locations are descriptive fields; the app does not yet
   ingest or store the source document itself.
 - Capability dependencies are stored and documented but do not yet block an
@@ -45,6 +48,11 @@ implementation determinations.
 - NIST SP 800-53 is the first integrated control catalog. The schema is
   framework-neutral, but additional catalog importers require their own
   source, provenance, and review process.
+- CSF Tier guidance is available as a source-traceable learning catalog.
+  Organizational Profiles can record target and current Tier
+  characterizations with rationales and append-only history. A Tier is not
+  calculated from controls or outcome assessments, and the Tier assessment UI
+  remains to be designed.
 
 ## Design rules
 

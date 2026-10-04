@@ -13,8 +13,9 @@ from xml.etree import ElementTree
 from csf_guidance import GENERIC_ACTION_DETAILS_EN_US, GENERIC_ACTION_RATIONALE_EN_US, GENERIC_ACTION_TITLE_EN_US, PLAIN_ENGLISH_GUIDANCE_EN_US, PRODUCT_EXAMPLES_EN_US
 from csf_capability_dependencies import CAPABILITY_DEPENDENCIES
 from csf_control_mapping_relationships import CONTROL_MAPPING_RELATIONSHIPS
-from csf_information_flows import INFORMATION_ITEMS, INFORMATION_SOURCES, INFORMATION_USES
+from csf_information_flows import INFORMATION_FLOW_CURRENT_ITEMS, INFORMATION_FLOW_EDGES
 from csf_profile import SUBCATEGORY_PROFILE_METADATA_EN_US
+from csf_tier_guidance import NIST_TIER_SOURCE, PRODUCT_GUIDANCE_NOTICE, TIER_GUIDANCE_SETS
 import csf_catalog
 
 
@@ -511,6 +512,23 @@ def init_db(connection: sqlite3.Connection) -> None:
             PRIMARY KEY(subcategory_id, language_code)
         );
 
+        CREATE TABLE IF NOT EXISTS csf_tier_guidance (
+            tier_level INTEGER PRIMARY KEY CHECK(tier_level IN (1, 2, 3, 4)),
+            tier_name TEXT NOT NULL,
+            official_governance_text TEXT NOT NULL,
+            official_management_text TEXT NOT NULL,
+            plain_language_text TEXT NOT NULL,
+            transition_label TEXT NOT NULL,
+            transition_hints_json TEXT NOT NULL DEFAULT '[]',
+            product_guidance_notice TEXT NOT NULL,
+            source_name TEXT NOT NULL,
+            source_version TEXT NOT NULL,
+            source_locator TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            source_kind TEXT NOT NULL DEFAULT 'official_nist_plus_product_guidance',
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS csf_outcome_audit_events (
             audit_event_id TEXT PRIMARY KEY,
             subcategory_id TEXT NOT NULL CHECK(length(trim(subcategory_id)) > 0),
@@ -695,6 +713,44 @@ def init_db(connection: sqlite3.Connection) -> None:
         CREATE TRIGGER IF NOT EXISTS prevent_csf_profile_audit_event_delete
         BEFORE DELETE ON csf_profile_audit_events BEGIN SELECT RAISE(ABORT, 'CSF profile audit events are append-only.'); END;
 
+        -- A Tier is an analyst's Profile-scoped characterization of risk
+        -- governance and management rigor. It is not derived from control
+        -- counts or outcome assessments and is not a compliance conclusion.
+        CREATE TABLE IF NOT EXISTS csf_profile_tier_assessments (
+            profile_id TEXT PRIMARY KEY,
+            target_tier_level INTEGER CHECK(target_tier_level IS NULL OR target_tier_level IN (1, 2, 3, 4)),
+            target_rationale TEXT NOT NULL DEFAULT '',
+            target_updated_by TEXT,
+            target_updated_at TEXT,
+            current_tier_level INTEGER CHECK(current_tier_level IS NULL OR current_tier_level IN (1, 2, 3, 4)),
+            current_rationale TEXT NOT NULL DEFAULT '',
+            current_updated_by TEXT,
+            current_updated_at TEXT,
+            FOREIGN KEY(profile_id) REFERENCES csf_profile_definitions(profile_id) ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS csf_profile_tier_audit_events (
+            tier_audit_event_id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            event_type TEXT NOT NULL CHECK(event_type IN (
+                'target_tier_recorded', 'target_tier_changed', 'target_tier_rationale_recorded',
+                'current_tier_recorded', 'current_tier_changed', 'current_tier_rationale_recorded'
+            )),
+            field_name TEXT NOT NULL,
+            old_value_json TEXT,
+            new_value_json TEXT NOT NULL,
+            rationale TEXT NOT NULL DEFAULT '',
+            recorded_by TEXT,
+            recorded_at TEXT NOT NULL,
+            FOREIGN KEY(profile_id) REFERENCES csf_profile_definitions(profile_id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_csf_profile_tier_audit_events_timeline
+            ON csf_profile_tier_audit_events(profile_id, recorded_at, tier_audit_event_id);
+        CREATE TRIGGER IF NOT EXISTS prevent_csf_profile_tier_audit_event_update
+        BEFORE UPDATE ON csf_profile_tier_audit_events BEGIN SELECT RAISE(ABORT, 'CSF Tier audit events are append-only.'); END;
+        CREATE TRIGGER IF NOT EXISTS prevent_csf_profile_tier_audit_event_delete
+        BEFORE DELETE ON csf_profile_tier_audit_events BEGIN SELECT RAISE(ABORT, 'CSF Tier audit events are append-only.'); END;
+
         -- Each row represents one official CSF Category or Subcategory in a
         -- named Organizational Profile. Field names mirror NIST's CSF 2.0
         -- Organizational Profile Template; no profile is seeded by default.
@@ -753,6 +809,71 @@ def init_db(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_csf_profile_action_guidance_profile
             ON csf_profile_action_guidance(profile_id, subcategory_id);
 
+        -- A Plan is a named, auditable organizational decision to coordinate
+        -- actions within one Organizational Profile.  Actions with no plan_id
+        -- are intentionally in the virtual Unplanned bucket; that bucket is
+        -- not represented by a synthetic plan row.
+        CREATE TABLE IF NOT EXISTS csf_plans (
+            plan_id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            plan_name TEXT NOT NULL CHECK(length(trim(plan_name)) > 0),
+            purpose TEXT NOT NULL DEFAULT '',
+            plan_status TEXT NOT NULL DEFAULT 'draft'
+                CHECK(plan_status IN ('draft', 'active', 'on_hold', 'completed', 'archived')),
+            plan_priority TEXT NOT NULL DEFAULT 'normal'
+                CHECK(plan_priority IN ('critical', 'high', 'normal', 'low')),
+            owner_name TEXT NOT NULL DEFAULT '',
+            start_on TEXT,
+            target_on TEXT,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            archived_at TEXT,
+            UNIQUE(profile_id, plan_name),
+            FOREIGN KEY(profile_id) REFERENCES csf_profile_definitions(profile_id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_csf_plans_profile_status
+            ON csf_plans(profile_id, plan_status, plan_priority, target_on, plan_name);
+
+        CREATE TRIGGER IF NOT EXISTS validate_csf_plan_profile_kind
+        BEFORE INSERT ON csf_plans
+        BEGIN
+            SELECT CASE WHEN NOT EXISTS (
+                SELECT 1 FROM csf_profile_definitions
+                WHERE profile_id = NEW.profile_id
+                  AND profile_kind = 'organizational'
+                  AND archived_at IS NULL
+            ) THEN RAISE(ABORT, 'Plans may be created only for an active Organizational Profile.') END;
+        END;
+
+        CREATE TABLE IF NOT EXISTS csf_plan_audit_events (
+            plan_audit_event_id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            plan_id TEXT,
+            action_id TEXT,
+            event_type TEXT NOT NULL CHECK(event_type IN (
+                'plan_created', 'plan_updated', 'plan_archived',
+                'action_assigned', 'action_reassigned', 'action_unplanned',
+                'action_priority_changed'
+            )),
+            field_name TEXT NOT NULL DEFAULT '',
+            old_value_json TEXT,
+            new_value_json TEXT NOT NULL DEFAULT '{}',
+            rationale TEXT NOT NULL DEFAULT '',
+            recorded_by TEXT,
+            recorded_at TEXT NOT NULL,
+            FOREIGN KEY(profile_id) REFERENCES csf_profile_definitions(profile_id) ON DELETE RESTRICT,
+            FOREIGN KEY(plan_id) REFERENCES csf_plans(plan_id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_csf_plan_audit_events_timeline
+            ON csf_plan_audit_events(profile_id, recorded_at, plan_audit_event_id);
+        CREATE INDEX IF NOT EXISTS idx_csf_plan_audit_events_plan
+            ON csf_plan_audit_events(plan_id, recorded_at, plan_audit_event_id);
+        CREATE TRIGGER IF NOT EXISTS prevent_csf_plan_audit_event_update
+        BEFORE UPDATE ON csf_plan_audit_events BEGIN SELECT RAISE(ABORT, 'CSF plan audit events are append-only.'); END;
+        CREATE TRIGGER IF NOT EXISTS prevent_csf_plan_audit_event_delete
+        BEFORE DELETE ON csf_plan_audit_events BEGIN SELECT RAISE(ABORT, 'CSF plan audit events are append-only.'); END;
+
         CREATE TABLE IF NOT EXISTS csf_supporting_basis (
             basis_id TEXT PRIMARY KEY,
             profile_id TEXT NOT NULL,
@@ -797,15 +918,20 @@ def init_db(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS csf_reviewed_actions (
             action_id TEXT PRIMARY KEY,
             profile_id TEXT NOT NULL,
+            plan_id TEXT,
             subcategory_id TEXT NOT NULL CHECK(length(trim(subcategory_id)) > 0),
             title TEXT NOT NULL CHECK(length(trim(title)) > 0),
             details TEXT,
             rationale TEXT,
             action_status TEXT NOT NULL CHECK(action_status IN ('planned', 'in_progress', 'completed', 'not_proceeding')),
+            action_priority TEXT NOT NULL DEFAULT 'normal'
+                CHECK(action_priority IN ('critical', 'high', 'normal', 'low')),
+            priority_rationale TEXT NOT NULL DEFAULT '',
             completed_at TEXT,
             created_by TEXT,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(plan_id) REFERENCES csf_plans(plan_id) ON DELETE RESTRICT
         );
 
         CREATE INDEX IF NOT EXISTS idx_csf_reviewed_actions_subcategory
@@ -1024,28 +1150,46 @@ def init_db(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS csf_subcategory_information_sources (
+        -- Product-authored, source-specific information paths.  This table is
+        -- intentionally introduced alongside the v1 source/use tables so the
+        -- current locked map remains available until its atomic edge catalog
+        -- has been reviewed and migrated.
+        CREATE TABLE IF NOT EXISTS csf_information_flow_edges (
+            edge_id TEXT PRIMARY KEY,
             information_id TEXT NOT NULL,
-            source_subcategory_id TEXT NOT NULL CHECK(length(trim(source_subcategory_id)) > 0),
+            source_kind TEXT NOT NULL CHECK(source_kind IN ('subcategory', 'external')),
+            source_subcategory_id TEXT,
+            external_source_label TEXT,
             source_guidance TEXT NOT NULL CHECK(length(trim(source_guidance)) > 0),
-            PRIMARY KEY(information_id, source_subcategory_id),
-            FOREIGN KEY(information_id) REFERENCES csf_information_items(information_id) ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_csf_information_sources_subcategory
-            ON csf_subcategory_information_sources(source_subcategory_id, information_id);
-
-        CREATE TABLE IF NOT EXISTS csf_subcategory_information_uses (
-            information_id TEXT NOT NULL,
             consumer_subcategory_id TEXT NOT NULL CHECK(length(trim(consumer_subcategory_id)) > 0),
-            dependency_kind TEXT NOT NULL CHECK(dependency_kind IN ('required_input', 'planning_input', 'event_input')),
+            dependency_kind TEXT NOT NULL CHECK(
+                dependency_kind IN ('required_input', 'planning_input', 'event_input', 'conditional_input')
+            ),
             use_reason TEXT NOT NULL CHECK(length(trim(use_reason)) > 0),
-            PRIMARY KEY(information_id, consumer_subcategory_id),
+            provenance TEXT NOT NULL DEFAULT 'product-authored-v2' CHECK(length(trim(provenance)) > 0),
+            updated_at TEXT NOT NULL,
+            CHECK(
+                (source_kind = 'subcategory'
+                    AND source_subcategory_id IS NOT NULL
+                    AND length(trim(source_subcategory_id)) > 0
+                    AND external_source_label IS NULL)
+                OR
+                (source_kind = 'external'
+                    AND source_subcategory_id IS NULL
+                    AND external_source_label IS NOT NULL
+                    AND length(trim(external_source_label)) > 0)
+            ),
             FOREIGN KEY(information_id) REFERENCES csf_information_items(information_id) ON DELETE CASCADE
         );
 
-        CREATE INDEX IF NOT EXISTS idx_csf_information_uses_subcategory
-            ON csf_subcategory_information_uses(consumer_subcategory_id, dependency_kind, information_id);
+        CREATE INDEX IF NOT EXISTS idx_csf_information_flow_edges_consumer
+            ON csf_information_flow_edges(consumer_subcategory_id, dependency_kind, information_id);
+
+        CREATE INDEX IF NOT EXISTS idx_csf_information_flow_edges_source
+            ON csf_information_flow_edges(source_kind, source_subcategory_id, information_id);
+
+        CREATE INDEX IF NOT EXISTS idx_csf_information_flow_edges_information
+            ON csf_information_flow_edges(information_id, edge_id);
 
         CREATE TABLE IF NOT EXISTS csf_subcategory_capability_dependencies (
             prerequisite_subcategory_id TEXT NOT NULL CHECK(length(trim(prerequisite_subcategory_id)) > 0),
@@ -1136,6 +1280,16 @@ def init_db(connection: sqlite3.Connection) -> None:
             connection.execute("ALTER TABLE csf_reviewed_actions ADD COLUMN rationale TEXT")
         if "profile_id" not in action_columns:
             connection.execute("ALTER TABLE csf_reviewed_actions ADD COLUMN profile_id TEXT")
+        if "plan_id" not in action_columns:
+            connection.execute("ALTER TABLE csf_reviewed_actions ADD COLUMN plan_id TEXT")
+        if "action_priority" not in action_columns:
+            connection.execute(
+                "ALTER TABLE csf_reviewed_actions ADD COLUMN action_priority TEXT NOT NULL DEFAULT 'normal'"
+            )
+        if "priority_rationale" not in action_columns:
+            connection.execute(
+                "ALTER TABLE csf_reviewed_actions ADD COLUMN priority_rationale TEXT NOT NULL DEFAULT ''"
+            )
         connection.execute(
             """CREATE INDEX IF NOT EXISTS idx_csf_supporting_basis_profile_subcategory
             ON csf_supporting_basis(profile_id, subcategory_id, updated_at, basis_id)"""
@@ -1143,6 +1297,32 @@ def init_db(connection: sqlite3.Connection) -> None:
         connection.execute(
             """CREATE INDEX IF NOT EXISTS idx_csf_reviewed_actions_profile_subcategory
             ON csf_reviewed_actions(profile_id, subcategory_id, action_status, updated_at, action_id)"""
+        )
+        connection.execute(
+            """CREATE INDEX IF NOT EXISTS idx_csf_reviewed_actions_plan
+            ON csf_reviewed_actions(profile_id, plan_id, action_priority, action_status, updated_at, action_id)"""
+        )
+        connection.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS validate_csf_action_plan_profile_insert
+            BEFORE INSERT ON csf_reviewed_actions
+            WHEN NEW.plan_id IS NOT NULL
+            BEGIN
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1 FROM csf_plans
+                    WHERE plan_id = NEW.plan_id AND profile_id = NEW.profile_id
+                ) THEN RAISE(ABORT, 'An action plan must belong to the same Profile as the action.') END;
+            END;
+            CREATE TRIGGER IF NOT EXISTS validate_csf_action_plan_profile_update
+            BEFORE UPDATE OF plan_id, profile_id ON csf_reviewed_actions
+            WHEN NEW.plan_id IS NOT NULL
+            BEGIN
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1 FROM csf_plans
+                    WHERE plan_id = NEW.plan_id AND profile_id = NEW.profile_id
+                ) THEN RAISE(ABORT, 'An action plan must belong to the same Profile as the action.') END;
+            END;
+            """
         )
         if "statement_text" not in reference_control_columns:
             connection.execute("ALTER TABLE csf_reference_controls ADD COLUMN statement_text TEXT")
@@ -1390,6 +1570,9 @@ def init_db(connection: sqlite3.Connection) -> None:
             (42, utc_now(), "Add reusable profile-scoped evidence artifacts and auditable outcome, action, and action-update uses."),
             (43, utc_now(), "Add append-only audit events for evidence-link changes."),
             (44, utc_now(), "Scope control-catalog selection to each CSF Profile."),
+            (45, utc_now(), "Add Profile-scoped action plans, plan audit events, and action priority/plan assignment fields."),
+            (46, utc_now(), "Add source-traceable CSF Tier guidance with separate official NIST and product-authored content."),
+            (47, utc_now(), "Add Profile-scoped current and target CSF Tier characterizations with append-only Tier audit events."),
         ],
     )
     connection.execute(
@@ -1435,26 +1618,81 @@ def init_db(connection: sqlite3.Connection) -> None:
         ON CONFLICT(subcategory_id, language_code) DO UPDATE SET assessment_method=excluded.assessment_method, research_guidance=excluded.research_guidance, supporting_note_required=excluded.supporting_note_required""",
         [(identifier, value["assessment_method"], value["research_guidance"], int(value["supporting_note_required"])) for identifier, value in SUBCATEGORY_PROFILE_METADATA_EN_US.items()],
     )
+    tier_guidance_updated_at = utc_now()
+    connection.executemany(
+        """INSERT INTO csf_tier_guidance(
+            tier_level, tier_name, official_governance_text, official_management_text,
+            plain_language_text, transition_label, transition_hints_json,
+            product_guidance_notice, source_name, source_version, source_locator,
+            source_url, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(tier_level) DO UPDATE SET
+            tier_name=excluded.tier_name,
+            official_governance_text=excluded.official_governance_text,
+            official_management_text=excluded.official_management_text,
+            plain_language_text=excluded.plain_language_text,
+            transition_label=excluded.transition_label,
+            transition_hints_json=excluded.transition_hints_json,
+            product_guidance_notice=excluded.product_guidance_notice,
+            source_name=excluded.source_name,
+            source_version=excluded.source_version,
+            source_locator=excluded.source_locator,
+            source_url=excluded.source_url,
+            updated_at=excluded.updated_at""",
+        [
+            (
+                item["tier_level"], item["tier_name"], item["official_governance_text"],
+                item["official_management_text"], item["plain_language_text"],
+                item["transition_label"], json.dumps(item["transition_hints"], ensure_ascii=True),
+                PRODUCT_GUIDANCE_NOTICE, NIST_TIER_SOURCE["source_name"],
+                NIST_TIER_SOURCE["source_version"], NIST_TIER_SOURCE["source_locator"],
+                NIST_TIER_SOURCE["source_url"], tier_guidance_updated_at,
+            )
+            for item in TIER_GUIDANCE_SETS
+        ],
+    )
     flow_updated_at = utc_now()
     connection.executemany(
         """INSERT INTO csf_information_items(information_id, title, description, source_label, updated_at)
-        VALUES (?, ?, ?, 'product-authored-v1', ?)
+        VALUES (?, ?, ?, 'product-authored-v2', ?)
         ON CONFLICT(information_id) DO UPDATE SET title=excluded.title, description=excluded.description,
             source_label=excluded.source_label, updated_at=excluded.updated_at""",
-        [(item["information_id"], item["title"], item["description"], flow_updated_at) for item in INFORMATION_ITEMS],
+        [(item["information_id"], item["title"], item["description"], flow_updated_at) for item in INFORMATION_FLOW_CURRENT_ITEMS],
     )
     connection.executemany(
-        """INSERT INTO csf_subcategory_information_sources(information_id, source_subcategory_id, source_guidance)
-        VALUES (?, ?, ?)
-        ON CONFLICT(information_id, source_subcategory_id) DO UPDATE SET source_guidance=excluded.source_guidance""",
-        [(item["information_id"], item["source_subcategory_id"], item["source_guidance"]) for item in INFORMATION_SOURCES],
+        """INSERT INTO csf_information_flow_edges(
+            edge_id, information_id, source_kind, source_subcategory_id, external_source_label,
+            source_guidance, consumer_subcategory_id, dependency_kind, use_reason, provenance, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(edge_id) DO UPDATE SET
+            information_id=excluded.information_id, source_kind=excluded.source_kind,
+            source_subcategory_id=excluded.source_subcategory_id,
+            external_source_label=excluded.external_source_label,
+            source_guidance=excluded.source_guidance,
+            consumer_subcategory_id=excluded.consumer_subcategory_id,
+            dependency_kind=excluded.dependency_kind, use_reason=excluded.use_reason,
+            provenance=excluded.provenance, updated_at=excluded.updated_at""",
+        [
+            (
+                item["edge_id"], item["information_id"], item["source_kind"], item["source_subcategory_id"],
+                item["external_source_label"], item["source_guidance"], item["consumer_subcategory_id"],
+                item["dependency_kind"], item["use_reason"], item["provenance"], flow_updated_at,
+            )
+            for item in INFORMATION_FLOW_EDGES
+        ],
     )
-    connection.executemany(
-        """INSERT INTO csf_subcategory_information_uses(information_id, consumer_subcategory_id, dependency_kind, use_reason)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(information_id, consumer_subcategory_id) DO UPDATE SET dependency_kind=excluded.dependency_kind,
-            use_reason=excluded.use_reason""",
-        [(item["information_id"], item["consumer_subcategory_id"], item["dependency_kind"], item["use_reason"]) for item in INFORMATION_USES],
+    # The legacy tables encoded independent source and use lists.  They have
+    # been superseded by source-specific v2 edges and are intentionally
+    # removed after the new catalog has been loaded.
+    connection.execute("DROP TABLE IF EXISTS csf_subcategory_information_sources")
+    connection.execute("DROP TABLE IF EXISTS csf_subcategory_information_uses")
+    connection.execute(
+        """DELETE FROM csf_information_items
+        WHERE source_label = 'product-authored-v1'
+          AND NOT EXISTS (
+              SELECT 1 FROM csf_information_flow_edges AS edge
+              WHERE edge.information_id = csf_information_items.information_id
+          )"""
     )
     capability_updated_at = utc_now()
     connection.executemany(
@@ -1508,6 +1746,9 @@ CSF_REVIEWED_ACTION_STATUSES = {
     "completed",
     "not_proceeding",
 }
+CSF_PLAN_STATUSES = {"draft", "active", "on_hold", "completed", "archived"}
+CSF_ACTION_PRIORITIES = {"critical", "high", "normal", "low"}
+CSF_TIER_LEVELS = {1, 2, 3, 4}
 
 
 def _local_csf_text(value: Any, field_name: str, *, required: bool, maximum: int) -> str:
@@ -1542,6 +1783,27 @@ def _active_csf_profile_id(connection: sqlite3.Connection, profile_id: Any) -> s
     if row is None:
         raise ValueError("The selected Organizational Profile is not available.")
     return identifier
+
+
+def _organizational_csf_profile_id(connection: sqlite3.Connection, profile_id: Any) -> str:
+    """Require an editable Organizational Profile for analyst-authored records."""
+    identifier = _active_csf_profile_id(connection, profile_id)
+    row = connection.execute(
+        "SELECT profile_kind FROM csf_profile_definitions WHERE profile_id = ?", (identifier,)
+    ).fetchone()
+    if row is None or str(row["profile_kind"]) != "organizational":
+        raise ValueError("Tier characterizations may be recorded only for an active Organizational Profile.")
+    return identifier
+
+
+def _csf_tier_level(value: Any, field_name: str) -> int:
+    try:
+        level = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a Tier from 1 through 4.") from exc
+    if level not in CSF_TIER_LEVELS:
+        raise ValueError(f"{field_name} must be a Tier from 1 through 4.")
+    return level
 
 
 def record_csf_outcome_audit_event(
@@ -1623,7 +1885,7 @@ def record_csf_outcome_audit_event(
 def list_csf_outcome_audit_events(
     connection: sqlite3.Connection, subcategory_id: Any, limit: int = 200
 ) -> List[Dict[str, Any]]:
-    """Return a Subcategory's audit ledger in stable chronological order."""
+    """Return a Subcategory's audit ledger newest first, with a stable tie-breaker."""
     subcategory = str(subcategory_id or "").strip().upper()
     if not subcategory:
         raise ValueError("subcategory_id is required.")
@@ -1639,10 +1901,210 @@ def list_csf_outcome_audit_events(
             """
             SELECT * FROM csf_outcome_audit_events
             WHERE subcategory_id = ?
-            ORDER BY recorded_at, audit_event_id
+            ORDER BY recorded_at DESC, audit_event_id DESC
             LIMIT ?
             """,
             (subcategory, row_limit),
+        ).fetchall()
+    ]
+
+
+def list_csf_tier_guidance(connection: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Return the four source-traceable CSF Tier guidance records.
+
+    Official NIST text and product-authored interpretation remain distinct in
+    each returned record. These catalog records do not represent a Profile's
+    Tier assessment or an audit conclusion.
+    """
+    records: List[Dict[str, Any]] = []
+    for row in connection.execute(
+        "SELECT * FROM csf_tier_guidance ORDER BY tier_level"
+    ).fetchall():
+        record = dict(row)
+        try:
+            record["transition_hints"] = json.loads(record.pop("transition_hints_json") or "[]")
+        except json.JSONDecodeError:
+            record["transition_hints"] = []
+        records.append(record)
+    return records
+
+
+def get_csf_profile_tier_assessment(
+    connection: sqlite3.Connection, profile_id: Any
+) -> Dict[str, Any]:
+    """Return one Profile's recorded Tier characterization, if any.
+
+    A missing target or current Tier is intentionally represented as ``None``;
+    the application must not infer a Tier from outcome assessments or controls.
+    """
+    profile = _active_csf_profile_id(connection, profile_id)
+    row = connection.execute(
+        "SELECT * FROM csf_profile_tier_assessments WHERE profile_id = ?", (profile,)
+    ).fetchone()
+    if row is not None:
+        return dict(row)
+    return {
+        "profile_id": profile,
+        "target_tier_level": None,
+        "target_rationale": "",
+        "target_updated_by": None,
+        "target_updated_at": None,
+        "current_tier_level": None,
+        "current_rationale": "",
+        "current_updated_by": None,
+        "current_updated_at": None,
+    }
+
+
+def record_csf_profile_tier_audit_event(
+    connection: sqlite3.Connection,
+    *,
+    profile_id: Any,
+    event_type: Any,
+    field_name: Any,
+    old_value: Any,
+    new_value: Any,
+    rationale: Any,
+    recorded_by: Any = "",
+    recorded_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Append an immutable event for a Profile Tier characterization change."""
+    profile = _organizational_csf_profile_id(connection, profile_id)
+    event = str(event_type or "").strip()
+    allowed_events = {
+        "target_tier_recorded", "target_tier_changed", "target_tier_rationale_recorded",
+        "current_tier_recorded", "current_tier_changed", "current_tier_rationale_recorded",
+    }
+    if event not in allowed_events:
+        raise ValueError("Invalid Tier audit event type.")
+    try:
+        old_json = None if old_value is None else json.dumps(old_value, ensure_ascii=True, sort_keys=True)
+        new_json = json.dumps(new_value, ensure_ascii=True, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Tier audit values must be JSON-serializable.") from exc
+    identifier = str(uuid.uuid4())
+    now = str(recorded_at or utc_now()).strip()
+    if not now:
+        raise ValueError("recorded_at must not be blank.")
+    with connection:
+        connection.execute(
+            """INSERT INTO csf_profile_tier_audit_events(
+                tier_audit_event_id, profile_id, event_type, field_name,
+                old_value_json, new_value_json, rationale, recorded_by, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                identifier, profile, event,
+                _local_csf_text(field_name, "Field name", required=True, maximum=120),
+                old_json, new_json,
+                _local_csf_text(rationale, "Tier rationale", required=True, maximum=4000),
+                _local_csf_text(recorded_by, "Recorded by", required=False, maximum=240) or None,
+                now,
+            ),
+        )
+    row = connection.execute(
+        "SELECT * FROM csf_profile_tier_audit_events WHERE tier_audit_event_id = ?", (identifier,)
+    ).fetchone()
+    return dict(row) if row else {}
+
+
+def _set_csf_profile_tier(
+    connection: sqlite3.Connection,
+    *,
+    profile_id: Any,
+    tier_column: str,
+    rationale_column: str,
+    updated_by_column: str,
+    updated_at_column: str,
+    field_name: str,
+    tier_level: Any,
+    rationale: Any,
+    recorded_by: Any,
+) -> Dict[str, Any]:
+    profile = _organizational_csf_profile_id(connection, profile_id)
+    level = _csf_tier_level(tier_level, field_name)
+    reason = _local_csf_text(rationale, "Tier rationale", required=True, maximum=4000)
+    previous = connection.execute(
+        f"SELECT {tier_column}, {rationale_column} FROM csf_profile_tier_assessments WHERE profile_id = ?",
+        (profile,),
+    ).fetchone()
+    old_level = int(previous[tier_column]) if previous is not None and previous[tier_column] is not None else None
+    old_reason = str(previous[rationale_column] or "") if previous is not None else ""
+    if old_level == level and old_reason == reason:
+        return get_csf_profile_tier_assessment(connection, profile)
+    now = utc_now()
+    with connection:
+        connection.execute(
+            f"""INSERT INTO csf_profile_tier_assessments(
+                profile_id, {tier_column}, {rationale_column}, {updated_by_column}, {updated_at_column}
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(profile_id) DO UPDATE SET
+                {tier_column}=excluded.{tier_column},
+                {rationale_column}=excluded.{rationale_column},
+                {updated_by_column}=excluded.{updated_by_column},
+                {updated_at_column}=excluded.{updated_at_column}""",
+            (profile, level, reason, str(recorded_by or "").strip() or None, now),
+        )
+        if old_level != level:
+            event_type = (
+                f"{field_name}_recorded" if old_level is None else f"{field_name}_changed"
+            )
+            record_csf_profile_tier_audit_event(
+                connection, profile_id=profile, event_type=event_type,
+                field_name=field_name, old_value=old_level, new_value=level,
+                rationale=reason, recorded_by=recorded_by, recorded_at=now,
+            )
+        elif old_reason != reason:
+            record_csf_profile_tier_audit_event(
+                connection, profile_id=profile, event_type=f"{field_name}_rationale_recorded",
+                field_name=field_name, old_value=old_reason, new_value=reason,
+                rationale=reason, recorded_by=recorded_by, recorded_at=now,
+            )
+    return get_csf_profile_tier_assessment(connection, profile)
+
+
+def set_csf_profile_target_tier(
+    connection: sqlite3.Connection, profile_id: Any, tier_level: Any,
+    rationale: Any, recorded_by: Any = "",
+) -> Dict[str, Any]:
+    """Record the Tier the organization intends this Profile to reach."""
+    return _set_csf_profile_tier(
+        connection, profile_id=profile_id, tier_column="target_tier_level",
+        rationale_column="target_rationale", updated_by_column="target_updated_by",
+        updated_at_column="target_updated_at", field_name="target_tier",
+        tier_level=tier_level, rationale=rationale, recorded_by=recorded_by,
+    )
+
+
+def set_csf_profile_current_tier(
+    connection: sqlite3.Connection, profile_id: Any, tier_level: Any,
+    rationale: Any, recorded_by: Any = "",
+) -> Dict[str, Any]:
+    """Record the analyst's current Tier characterization for one Profile."""
+    return _set_csf_profile_tier(
+        connection, profile_id=profile_id, tier_column="current_tier_level",
+        rationale_column="current_rationale", updated_by_column="current_updated_by",
+        updated_at_column="current_updated_at", field_name="current_tier",
+        tier_level=tier_level, rationale=rationale, recorded_by=recorded_by,
+    )
+
+
+def list_csf_profile_tier_audit_events(
+    connection: sqlite3.Connection, profile_id: Any, limit: int = 200
+) -> List[Dict[str, Any]]:
+    """Return the append-only Tier characterization history for one Profile."""
+    profile = _active_csf_profile_id(connection, profile_id)
+    try:
+        row_limit = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("limit must be a positive integer.") from exc
+    if row_limit < 1:
+        raise ValueError("limit must be a positive integer.")
+    return [
+        dict(row)
+        for row in connection.execute(
+            """SELECT * FROM csf_profile_tier_audit_events
+            WHERE profile_id = ? ORDER BY recorded_at DESC, rowid DESC LIMIT ?""",
+            (profile, row_limit),
         ).fetchall()
     ]
 
@@ -2426,7 +2888,7 @@ def record_csf_profile_audit_event(
 
 def list_csf_profile_audit_events(connection: sqlite3.Connection, profile_name: str) -> List[Dict[str, Any]]:
     return [dict(row) for row in connection.execute(
-        "SELECT * FROM csf_profile_audit_events WHERE profile_name = ? ORDER BY recorded_at, rowid",
+        "SELECT * FROM csf_profile_audit_events WHERE profile_name = ? ORDER BY recorded_at DESC, rowid DESC",
         (profile_name,),
     ).fetchall()]
 
@@ -2870,6 +3332,313 @@ def create_csf_profile_definition(
     except sqlite3.IntegrityError as exc:
         raise ValueError("A profile with that name already exists.") from exc
     return get_active_csf_profile(connection)
+
+
+def record_csf_plan_audit_event(
+    connection: sqlite3.Connection,
+    *,
+    profile_id: Any,
+    event_type: Any,
+    plan_id: Any = "",
+    action_id: Any = "",
+    field_name: Any = "",
+    old_value: Any = None,
+    new_value: Any = None,
+    rationale: Any = "",
+    recorded_by: Any = "",
+    recorded_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Append one immutable audit event for plan or action-planning changes."""
+    profile = _active_csf_profile_id(connection, profile_id)
+    event = _optional_csf_audit_value(event_type, "event_type", {
+        "plan_created", "plan_updated", "plan_archived", "action_assigned",
+        "action_reassigned", "action_unplanned", "action_priority_changed",
+    })
+    if event is None:
+        raise ValueError("event_type is required.")
+    identifier = str(plan_id or "").strip() or None
+    if identifier is not None:
+        plan = connection.execute(
+            "SELECT profile_id FROM csf_plans WHERE plan_id = ?", (identifier,)
+        ).fetchone()
+        if plan is None or str(plan["profile_id"]) != profile:
+            raise ValueError("The plan must belong to the selected Profile.")
+    try:
+        old_json = None if old_value is None else json.dumps(old_value, ensure_ascii=True, sort_keys=True)
+        new_json = json.dumps({} if new_value is None else new_value, ensure_ascii=True, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Plan audit values must be JSON-serializable.") from exc
+    event_id = str(uuid.uuid4())
+    now = str(recorded_at or utc_now()).strip()
+    with connection:
+        connection.execute(
+            """INSERT INTO csf_plan_audit_events(
+                plan_audit_event_id, profile_id, plan_id, action_id, event_type,
+                field_name, old_value_json, new_value_json, rationale, recorded_by, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                event_id, profile, identifier, str(action_id or "").strip() or None,
+                event, _local_csf_text(field_name, "Field name", required=False, maximum=120),
+                old_json, new_json,
+                _local_csf_text(rationale, "Rationale", required=False, maximum=4000),
+                _local_csf_text(recorded_by, "Recorded by", required=False, maximum=240) or None,
+                now,
+            ),
+        )
+    row = connection.execute(
+        "SELECT * FROM csf_plan_audit_events WHERE plan_audit_event_id = ?", (event_id,)
+    ).fetchone()
+    return dict(row) if row else {}
+
+
+def create_csf_plan(
+    connection: sqlite3.Connection,
+    *,
+    profile_id: Any,
+    plan_name: Any,
+    purpose: Any = "",
+    plan_status: Any = "draft",
+    plan_priority: Any = "normal",
+    owner_name: Any = "",
+    start_on: Any = "",
+    target_on: Any = "",
+    created_by: Any = "",
+    rationale: Any = "",
+    plan_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a named Plan for an active Organizational Profile."""
+    profile = _active_csf_profile_id(connection, profile_id)
+    definition = connection.execute(
+        "SELECT profile_kind FROM csf_profile_definitions WHERE profile_id = ?", (profile,)
+    ).fetchone()
+    if definition is None or str(definition["profile_kind"]) != "organizational":
+        raise ValueError("Plans may be created only for an active Organizational Profile.")
+    status = _optional_csf_audit_value(plan_status, "plan_status", CSF_PLAN_STATUSES)
+    priority = _optional_csf_audit_value(plan_priority, "plan_priority", CSF_ACTION_PRIORITIES)
+    if status is None or priority is None:
+        raise ValueError("A plan status and priority are required.")
+    identifier = str(plan_id or uuid.uuid4()).strip()
+    if not identifier:
+        raise ValueError("plan_id must not be blank.")
+    now = utc_now()
+    name = _local_csf_text(plan_name, "Plan name", required=True, maximum=240)
+    with connection:
+        connection.execute(
+            """INSERT INTO csf_plans(
+                plan_id, profile_id, plan_name, purpose, plan_status, plan_priority,
+                owner_name, start_on, target_on, created_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                identifier, profile, name,
+                _local_csf_text(purpose, "Purpose", required=False, maximum=4000),
+                status, priority,
+                _local_csf_text(owner_name, "Owner", required=False, maximum=240),
+                _local_csf_text(start_on, "Start date", required=False, maximum=64) or None,
+                _local_csf_text(target_on, "Target date", required=False, maximum=64) or None,
+                _local_csf_text(created_by, "Created by", required=False, maximum=240) or None,
+                now, now,
+            ),
+        )
+        record_csf_plan_audit_event(
+            connection, profile_id=profile, plan_id=identifier, event_type="plan_created",
+            new_value={"plan_name": name, "plan_status": status, "plan_priority": priority},
+            rationale=rationale or "Plan created.", recorded_by=created_by, recorded_at=now,
+        )
+    row = connection.execute("SELECT * FROM csf_plans WHERE plan_id = ?", (identifier,)).fetchone()
+    return dict(row) if row else {}
+
+
+def update_csf_plan(
+    connection: sqlite3.Connection,
+    *,
+    plan_id: Any,
+    plan_name: Any,
+    purpose: Any = "",
+    plan_status: Any = "draft",
+    plan_priority: Any = "normal",
+    owner_name: Any = "",
+    start_on: Any = "",
+    target_on: Any = "",
+    rationale: Any = "",
+    recorded_by: Any = "",
+) -> Dict[str, Any]:
+    """Update a named Plan and append one event for every changed field."""
+    identifier = str(plan_id or "").strip()
+    if not identifier:
+        raise ValueError("plan_id is required.")
+    current = connection.execute("SELECT * FROM csf_plans WHERE plan_id = ?", (identifier,)).fetchone()
+    if current is None:
+        raise ValueError("Plan was not found.")
+    profile = _organizational_csf_profile_id(connection, current["profile_id"])
+    desired = {
+        "plan_name": _local_csf_text(plan_name, "Plan name", required=True, maximum=240),
+        "purpose": _local_csf_text(purpose, "Purpose", required=False, maximum=4000),
+        "plan_status": _optional_csf_audit_value(plan_status, "plan_status", CSF_PLAN_STATUSES),
+        "plan_priority": _optional_csf_audit_value(plan_priority, "plan_priority", CSF_ACTION_PRIORITIES),
+        "owner_name": _local_csf_text(owner_name, "Owner", required=False, maximum=240),
+        "start_on": _local_csf_text(start_on, "Start date", required=False, maximum=64) or None,
+        "target_on": _local_csf_text(target_on, "Target date", required=False, maximum=64) or None,
+    }
+    if desired["plan_status"] is None or desired["plan_priority"] is None:
+        raise ValueError("A plan status and priority are required.")
+    changes = {
+        field: {"old": current[field], "new": value}
+        for field, value in desired.items()
+        if (current[field] or None) != (value or None)
+    }
+    if not changes:
+        return dict(current)
+    reason = _local_csf_text(rationale, "Rationale", required=False, maximum=4000)
+    now = utc_now()
+    with connection:
+        connection.execute(
+            """UPDATE csf_plans SET plan_name=?, purpose=?, plan_status=?, plan_priority=?,
+                owner_name=?, start_on=?, target_on=?, updated_at=? WHERE plan_id=?""",
+            (
+                desired["plan_name"], desired["purpose"], desired["plan_status"], desired["plan_priority"],
+                desired["owner_name"], desired["start_on"], desired["target_on"], now, identifier,
+            ),
+        )
+        for field, values in changes.items():
+            record_csf_plan_audit_event(
+                connection, profile_id=profile, plan_id=identifier, event_type="plan_updated",
+                field_name=field, old_value=values["old"], new_value=values["new"],
+                rationale=reason, recorded_by=recorded_by, recorded_at=now,
+            )
+    updated = connection.execute("SELECT * FROM csf_plans WHERE plan_id = ?", (identifier,)).fetchone()
+    return dict(updated) if updated else {}
+
+
+def list_csf_plans(connection: sqlite3.Connection, profile_id: Any, include_archived: bool = False) -> List[Dict[str, Any]]:
+    """List a Profile's named plans.  Unplanned work is deliberately not a row here."""
+    profile = _active_csf_profile_id(connection, profile_id)
+    clauses = ["plan.profile_id = ?"]
+    if not include_archived:
+        clauses.append("plan.plan_status <> 'archived'")
+    rows = connection.execute(
+        """SELECT plan.*, COUNT(action.action_id) AS action_count
+        FROM csf_plans plan
+        LEFT JOIN csf_reviewed_actions action ON action.plan_id = plan.plan_id
+        WHERE """ + " AND ".join(clauses) + """
+        GROUP BY plan.plan_id
+        ORDER BY CASE plan.plan_priority
+            WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+            CASE plan.plan_status WHEN 'active' THEN 0 WHEN 'draft' THEN 1 WHEN 'on_hold' THEN 2 ELSE 3 END,
+            COALESCE(plan.target_on, '9999-12-31'), plan.plan_name COLLATE NOCASE""",
+        (profile,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def set_csf_action_plan_and_priority(
+    connection: sqlite3.Connection,
+    *,
+    action_id: Any,
+    plan_id: Any = None,
+    action_priority: Any = None,
+    priority_rationale: Any = None,
+    rationale: Any = "",
+    recorded_by: Any = "",
+) -> Dict[str, Any]:
+    """Assign an action to a named Plan (or the virtual Unplanned bucket) and set its priority.
+
+    A blank ``plan_id`` deliberately means *Unplanned*.  No placeholder Plan row is
+    created, so reports can distinguish work that has not been deliberately planned.
+    """
+    record_id = str(action_id or "").strip()
+    if not record_id:
+        raise ValueError("action_id is required.")
+    current = connection.execute(
+        """SELECT action_id, profile_id, plan_id, action_priority, priority_rationale, updated_at
+        FROM csf_reviewed_actions WHERE action_id = ?""",
+        (record_id,),
+    ).fetchone()
+    if current is None:
+        raise ValueError("Reviewed action was not found.")
+
+    profile = str(current["profile_id"])
+    previous_plan_id = str(current["plan_id"] or "").strip() or None
+    requested_plan_id = previous_plan_id if plan_id is None else str(plan_id or "").strip() or None
+    previous_priority = str(current["action_priority"] or "normal")
+    requested_priority = previous_priority if action_priority is None else _optional_csf_audit_value(
+        action_priority, "action_priority", CSF_ACTION_PRIORITIES
+    )
+    if requested_priority is None:
+        raise ValueError("action_priority is required.")
+    previous_priority_rationale = str(current["priority_rationale"] or "")
+    requested_priority_rationale = previous_priority_rationale if priority_rationale is None else _local_csf_text(
+        priority_rationale, "Priority rationale", required=False, maximum=4000
+    )
+
+    plan_names: Dict[Optional[str], Optional[str]] = {None: None}
+    if previous_plan_id:
+        prior_plan = connection.execute(
+            "SELECT plan_name FROM csf_plans WHERE plan_id = ?", (previous_plan_id,)
+        ).fetchone()
+        plan_names[previous_plan_id] = str(prior_plan["plan_name"]) if prior_plan else None
+    if requested_plan_id:
+        requested_plan = connection.execute(
+            "SELECT profile_id, plan_name FROM csf_plans WHERE plan_id = ?", (requested_plan_id,)
+        ).fetchone()
+        if requested_plan is None or str(requested_plan["profile_id"]) != profile:
+            raise ValueError("The Plan must belong to the action's Profile.")
+        plan_names[requested_plan_id] = str(requested_plan["plan_name"])
+
+    now = utc_now()
+    prior_updated_at = datetime.fromisoformat(str(current["updated_at"]))
+    if datetime.fromisoformat(now) <= prior_updated_at:
+        now = (prior_updated_at + timedelta(microseconds=1)).isoformat()
+    change_reason = _local_csf_text(rationale, "Rationale", required=False, maximum=4000)
+    actor = _local_csf_text(recorded_by, "Recorded by", required=False, maximum=240)
+
+    with connection:
+        connection.execute(
+            """UPDATE csf_reviewed_actions
+            SET plan_id = ?, action_priority = ?, priority_rationale = ?, updated_at = ?
+            WHERE action_id = ?""",
+            (requested_plan_id, requested_priority, requested_priority_rationale, now, record_id),
+        )
+        if requested_plan_id != previous_plan_id:
+            assignment_event = (
+                "action_unplanned" if requested_plan_id is None
+                else "action_assigned" if previous_plan_id is None
+                else "action_reassigned"
+            )
+            record_csf_plan_audit_event(
+                connection,
+                profile_id=profile,
+                # For an Unplanned event, retain the former Plan ID on the event.
+                plan_id=requested_plan_id or previous_plan_id,
+                action_id=record_id,
+                event_type=assignment_event,
+                field_name="plan_id",
+                old_value={"plan_id": previous_plan_id, "plan_name": plan_names.get(previous_plan_id)},
+                new_value={"plan_id": requested_plan_id, "plan_name": plan_names.get(requested_plan_id)},
+                rationale=change_reason,
+                recorded_by=actor,
+                recorded_at=now,
+            )
+        if (
+            requested_priority != previous_priority
+            or requested_priority_rationale != previous_priority_rationale
+        ):
+            record_csf_plan_audit_event(
+                connection,
+                profile_id=profile,
+                plan_id=requested_plan_id,
+                action_id=record_id,
+                event_type="action_priority_changed",
+                field_name="action_priority",
+                old_value={"action_priority": previous_priority, "priority_rationale": previous_priority_rationale},
+                new_value={"action_priority": requested_priority, "priority_rationale": requested_priority_rationale},
+                rationale=change_reason,
+                recorded_by=actor,
+                recorded_at=now,
+            )
+    row = connection.execute(
+        "SELECT * FROM csf_reviewed_actions WHERE action_id = ?", (record_id,)
+    ).fetchone()
+    return dict(row) if row else {}
 
 
 def _csf_record_text(value: Any, field_name: str, *, required: bool, maximum: int) -> str:
@@ -3337,6 +4106,9 @@ def create_csf_reviewed_action(
     basis_ids: Iterable[Any] = (),
     control_id: Any = "",
     framework_id: str = "nist-sp-800-53-r5.2.0",
+    plan_id: Any = "",
+    action_priority: Any = "normal",
+    priority_rationale: Any = "",
     action_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a reviewed action and optional Profile-scoped evidence links."""
@@ -3349,6 +4121,18 @@ def create_csf_reviewed_action(
     )
     if status is None:
         raise ValueError("action_status is required.")
+    selected_plan_id = str(plan_id or "").strip() or None
+    priority = _optional_csf_audit_value(action_priority, "action_priority", CSF_ACTION_PRIORITIES)
+    if priority is None:
+        raise ValueError("action_priority is required.")
+    selected_plan_name = ""
+    if selected_plan_id:
+        plan = connection.execute(
+            "SELECT profile_id, plan_name FROM csf_plans WHERE plan_id = ?", (selected_plan_id,)
+        ).fetchone()
+        if plan is None or str(plan["profile_id"]) != profile:
+            raise ValueError("The Plan must belong to the action's Profile.")
+        selected_plan_name = str(plan["plan_name"])
     linked_basis_ids = sorted({str(value or "").strip() for value in basis_ids if str(value or "").strip()})
     selected_control_id = str(control_id or "").strip().upper()
     if linked_basis_ids:
@@ -3387,24 +4171,55 @@ def create_csf_reviewed_action(
         connection.execute(
             """
             INSERT INTO csf_reviewed_actions (
-                action_id, profile_id, subcategory_id, title, details, rationale, action_status, completed_at,
-                created_by, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                action_id, profile_id, plan_id, subcategory_id, title, details, rationale, action_status,
+                action_priority, priority_rationale, completed_at, created_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record_id,
                 profile,
+                selected_plan_id,
                 subcategory,
                 _csf_record_text(title, "Title", required=True, maximum=240),
                 _csf_record_text(details, "Details", required=False, maximum=8000) or None,
                 _csf_record_text(rationale, "Rationale", required=False, maximum=4000) or None,
                 status,
+                priority,
+                _csf_record_text(priority_rationale, "Priority rationale", required=False, maximum=4000),
                 recorded_completed_at,
                 _csf_record_text(created_by, "Created by", required=False, maximum=240) or None,
                 now,
                 now,
             ),
         )
+        if selected_plan_id:
+            record_csf_plan_audit_event(
+                connection,
+                profile_id=profile,
+                plan_id=selected_plan_id,
+                action_id=record_id,
+                event_type="action_assigned",
+                field_name="plan_id",
+                old_value={"plan_id": None, "plan_name": None},
+                new_value={"plan_id": selected_plan_id, "plan_name": selected_plan_name},
+                rationale="Action created in this Plan.",
+                recorded_by=created_by,
+                recorded_at=now,
+            )
+        if priority != "normal" or str(priority_rationale or "").strip():
+            record_csf_plan_audit_event(
+                connection,
+                profile_id=profile,
+                plan_id=selected_plan_id,
+                action_id=record_id,
+                event_type="action_priority_changed",
+                field_name="action_priority",
+                old_value={"action_priority": "normal", "priority_rationale": ""},
+                new_value={"action_priority": priority, "priority_rationale": str(priority_rationale or "").strip()},
+                rationale="Action created with a priority.",
+                recorded_by=created_by,
+                recorded_at=now,
+            )
         connection.executemany(
             """INSERT INTO csf_reviewed_action_basis_links(
                 action_id, basis_id, link_role, assertion_text, applicability_note,
@@ -3649,7 +4464,8 @@ def list_csf_reviewed_actions(
             control_link.framework_id AS control_framework_id,
             control_link.control_id AS control_id,
             control.title AS control_title,
-            catalog.display_name AS control_catalog_name
+            catalog.display_name AS control_catalog_name,
+            plan.plan_name AS plan_name
         FROM csf_reviewed_actions a
         LEFT JOIN csf_reviewed_action_basis_links link ON link.action_id = a.action_id
         LEFT JOIN csf_supporting_basis evidence ON evidence.basis_id = link.basis_id
@@ -3657,6 +4473,7 @@ def list_csf_reviewed_actions(
         LEFT JOIN csf_reference_controls control
             ON control.framework_id = control_link.framework_id AND control.control_id = control_link.control_id
         LEFT JOIN csf_control_catalogs catalog ON catalog.framework_id = control_link.framework_id
+        LEFT JOIN csf_plans plan ON plan.plan_id = a.plan_id
         WHERE a.profile_id = ? AND a.subcategory_id = ?
         GROUP BY a.action_id
         ORDER BY a.updated_at DESC, a.action_id
@@ -3672,6 +4489,60 @@ def list_csf_reviewed_actions(
         }
         for row in rows
     ]
+
+
+def list_csf_profile_actions(
+    connection: sqlite3.Connection,
+    profile_id: Any,
+    plan_id: Any = None,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    """List a Profile's actions for planning views; ``plan_id=''`` means Unplanned."""
+    profile = _active_csf_profile_id(connection, profile_id)
+    if not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be a positive integer.")
+    clauses = ["action.profile_id = ?"]
+    values: List[Any] = [profile]
+    if plan_id is not None:
+        requested_plan_id = str(plan_id or "").strip()
+        if requested_plan_id:
+            clauses.append("action.plan_id = ?")
+            values.append(requested_plan_id)
+        else:
+            clauses.append("action.plan_id IS NULL")
+    values.append(limit)
+    rows = connection.execute(
+        """SELECT action.*, plan.plan_name
+        FROM csf_reviewed_actions action
+        LEFT JOIN csf_plans plan ON plan.plan_id = action.plan_id
+        WHERE """ + " AND ".join(clauses) + """
+        ORDER BY CASE action.action_priority
+            WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+            action.updated_at DESC, action.action_id
+        LIMIT ?""",
+        values,
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_csf_plan_audit_events(
+    connection: sqlite3.Connection, profile_id: Any, limit: int = 500
+) -> List[Dict[str, Any]]:
+    """Return immutable planning events newest first for one Profile."""
+    profile = _active_csf_profile_id(connection, profile_id)
+    if not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be a positive integer.")
+    rows = connection.execute(
+        """SELECT event.*, plan.plan_name, action.title AS action_title, action.subcategory_id
+        FROM csf_plan_audit_events event
+        LEFT JOIN csf_plans plan ON plan.plan_id = event.plan_id
+        LEFT JOIN csf_reviewed_actions action ON action.action_id = event.action_id
+        WHERE event.profile_id = ?
+        ORDER BY event.recorded_at DESC, event.plan_audit_event_id DESC
+        LIMIT ?""",
+        (profile, limit),
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def list_csf_control_catalogs(connection: sqlite3.Connection) -> List[Dict[str, Any]]:

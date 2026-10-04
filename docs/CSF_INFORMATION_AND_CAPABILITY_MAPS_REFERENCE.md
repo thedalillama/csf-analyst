@@ -65,12 +65,13 @@ keyword, similar purpose, or convenient implementation order as a relationship.
 | Table | Purpose |
 |---|---|
 | `csf_information_items` | Canonical product-authored information item definitions. |
-| `csf_subcategory_information_sources` | CSF or external source that can provide an item. |
-| `csf_subcategory_information_uses` | CSF outcome that uses an item and why. |
+| `csf_information_flow_edges` | Explicit product-authored producer-to-item-to-consumer paths, including external sources and the relationship strength/reason. |
 | `csf_subcategory_capability_dependencies` | Prerequisite/dependent capability relationship and strength. |
 
 Update source catalogs rather than directly editing these tables. `init_db()`
-upserts source records into SQLite so source code remains the maintainable form.
+upserts the explicit paths into SQLite so source code remains the maintainable
+form. The legacy independent source/use tables were retired during the v2
+migration; Tile 3 reads only explicit paths.
 
 ## UI behavior
 

@@ -216,6 +216,21 @@ def read_text(path: Path) -> str:
 UI_CLIENT_SCRIPT = """
 <script>
 (() => {
+  const themeStorageKey = "csf-analyst-theme";
+  const updateThemeToggle = () => {
+    const dark = document.documentElement.dataset.theme === "dark";
+    document.querySelectorAll("button[data-theme-toggle]").forEach((button) => {
+      button.textContent = dark ? "Light mode" : "Dark mode";
+      button.setAttribute("aria-pressed", String(dark));
+    });
+  };
+  const toggleTheme = () => {
+    const dark = document.documentElement.dataset.theme !== "dark";
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    try { localStorage.setItem(themeStorageKey, dark ? "dark" : "light"); } catch (_) {}
+    updateThemeToggle();
+  };
+
   const fragmentUrl = (href, fragment) => {
     const url = new URL(href, window.location.origin);
     url.searchParams.set("fragment", fragment);
@@ -235,6 +250,16 @@ UI_CLIENT_SCRIPT = """
     return true;
   };
 
+  const openRequestedInformationFlow = (href = window.location.href) => {
+    const url = new URL(href, window.location.origin);
+    const selector = url.searchParams.get("capabilities") === "1"
+      ? "button[data-capability-modal]"
+      : url.searchParams.get("information_flow") === "1"
+        ? "button[data-information-flow-modal]"
+        : "";
+    if (selector) requestAnimationFrame(() => document.querySelector(selector)?.click());
+  };
+
   const navigate = async (href, push, focusExplorerList = "") => {
     const app = document.getElementById("csf-app");
     if (!app) { window.location.assign(href); return; }
@@ -243,13 +268,14 @@ UI_CLIENT_SCRIPT = """
       const response = await fetch(fragmentUrl(href, "app"), { headers: { "X-Codex-Fragment": "app" } });
       if (!response.ok || !replaceWorkspace(await response.text(), focusExplorerList)) throw new Error("Workspace response was unavailable.");
       if (push) window.history.pushState({ csfWorkspace: true }, "", href);
+      openRequestedInformationFlow(href);
     } catch (_) {
       window.location.assign(href);
     }
   };
 
   const listScrollStep = (list) => {
-    const row = list.querySelector(".csf-explorer-row, .csf-record-row, .csf-profile-choice");
+    const row = list.querySelector(".csf-explorer-row, .csf-record-row, .csf-profile-choice, .csf-control-choice");
     if (!row) return 0;
     const rowGap = Number.parseFloat(window.getComputedStyle(list).rowGap) || 0;
     return row.getBoundingClientRect().height + rowGap;
@@ -271,6 +297,12 @@ UI_CLIENT_SCRIPT = """
     const dialog = host?.querySelector("[role=dialog]");
     const returnFocus = dialog?.dataset.returnFocus;
     if (host) host.replaceChildren();
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("information_flow") === "1" || url.searchParams.get("capabilities") === "1") {
+      url.searchParams.delete("information_flow");
+      url.searchParams.delete("capabilities");
+      window.history.replaceState(window.history.state, "", url);
+    }
     if (returnFocus) document.getElementById(returnFocus)?.focus();
   };
 
@@ -313,10 +345,35 @@ UI_CLIENT_SCRIPT = """
     }
   };
 
+  document.querySelectorAll("button[data-profile-save-all].is-saved").forEach((button) => {
+    window.setTimeout(() => {
+      button.disabled = false;
+      button.classList.remove("is-saved");
+      button.textContent = "Save profile changes";
+    }, 3000);
+  });
+
   document.addEventListener("click", (event) => {
+    const themeToggle = event.target.closest("button[data-theme-toggle]");
+    if (themeToggle) { event.preventDefault(); toggleTheme(); return; }
     const modalClose = event.target.closest("button[data-modal-close]");
     const backdrop = event.target.closest(".modal-backdrop");
     if (modalClose || (backdrop && event.target === backdrop)) { event.preventDefault(); closeModal(); return; }
+    const capabilityModal = event.target.closest("button[data-capability-modal]");
+    if (capabilityModal) {
+      event.preventDefault();
+      const host = document.getElementById("csf-modal-host");
+      const template = document.getElementById("csf-capability-template");
+      if (!host || !template) return;
+      if (!capabilityModal.id) capabilityModal.id = `capability-opener-${Date.now()}`;
+      host.replaceChildren(template.content.cloneNode(true));
+      const dialog = host.querySelector("[role=dialog]");
+      if (dialog) {
+        dialog.dataset.returnFocus = capabilityModal.id;
+        dialog.querySelector("[data-modal-close]")?.focus();
+      }
+      return;
+    }
     const informationFlow = event.target.closest("button[data-information-flow-modal]");
     if (informationFlow) {
       event.preventDefault();
@@ -352,7 +409,35 @@ UI_CLIENT_SCRIPT = """
     }
   });
 
-  document.addEventListener("submit", (event) => {
+  updateThemeToggle();
+  openRequestedInformationFlow();
+
+  document.addEventListener("submit", async (event) => {
+    const form = event.target;
+    const planAssignmentAction = form?.getAttribute?.("action");
+    if (
+      form?.closest?.("#csf-modal-host")
+      && (planAssignmentAction === "/assign-csf-action-plan" || planAssignmentAction === "/unassign-csf-action-plan")
+    ) {
+      event.preventDefault();
+      const planId = form.querySelector("input[name='plan_id']")?.value || "";
+      const planRationale = form.closest(".modal-dialog")?.querySelector("#csf-plan-form textarea[name='rationale']")?.value?.trim() || "";
+      try {
+        const formData = new FormData(form);
+        if (planRationale) formData.set("rationale", planRationale);
+        const response = await fetch(form.action, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+          body: new URLSearchParams(formData),
+        });
+        if (!response.ok || !planId) throw new Error("The Plan update was unavailable.");
+        await navigate("/plans", false);
+        await openModal(`/csf-plan?plan_id=${encodeURIComponent(planId)}`, null);
+      } catch (_) {
+        window.alert("The action could not be assigned or unlinked. Please try again.");
+      }
+      return;
+    }
     if (event.submitter?.matches("[data-confirm-delete]") && !window.confirm("Delete this action and all of its progress updates? This cannot be undone.")) {
       event.preventDefault();
       return;
@@ -418,6 +503,19 @@ UI_CLIENT_SCRIPT = """
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && document.querySelector("#csf-modal-host [role=dialog]")) closeModal();
+    const mappedControlList = event.target.closest?.(".csf-mapped-control-list");
+    if (mappedControlList && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      event.preventDefault();
+      mappedControlList.scrollBy({ top: event.key === "ArrowDown" ? 24 : -24, behavior: "smooth" });
+      return;
+    }
+    const evidencePicker = event.target.closest?.(".csf-action-evidence-list");
+    if (evidencePicker && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      const step = listScrollStep(evidencePicker);
+      event.preventDefault();
+      evidencePicker.scrollBy({ top: event.key === "ArrowDown" ? step : -step, behavior: "auto" });
+      return;
+    }
     const explorerList = event.target.closest?.(".csf-explorer-list, .csf-record-list");
     if (explorerList && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
       event.preventDefault();
@@ -426,6 +524,19 @@ UI_CLIENT_SCRIPT = """
   });
 
   document.addEventListener("wheel", (event) => {
+    const mappedControlList = event.target.closest?.(".csf-mapped-control-list");
+    if (mappedControlList && event.deltaY) {
+      event.preventDefault();
+      mappedControlList.scrollBy({ top: event.deltaY > 0 ? 24 : -24, behavior: "smooth" });
+      return;
+    }
+    const evidencePicker = event.target.closest?.(".csf-action-evidence-list");
+    if (evidencePicker && event.deltaY) {
+      const step = listScrollStep(evidencePicker);
+      event.preventDefault();
+      evidencePicker.scrollBy({ top: event.deltaY > 0 ? step : -step, behavior: "auto" });
+      return;
+    }
     const explorerList = event.target.closest?.(".csf-explorer-list, .csf-record-list");
     if (!explorerList || !event.deltaY) return;
     event.preventDefault();
@@ -465,8 +576,10 @@ def html_page(title: str, body: str) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html.escape(title)}</title>
+  <script>(() => {{ try {{ if (localStorage.getItem("csf-analyst-theme") === "dark") document.documentElement.dataset.theme = "dark"; }} catch (_) {{}} }})();</script>
   <style>
     :root {{ color-scheme: light; --bg:#f6f2ea; --panel:#fffdfa; --panel-soft:#f4ede4; --ink:#22323b; --muted:#6b7a81; --line:rgba(34,50,59,.12); --sage:#7da38f; --sage-soft:#e8f0ea; --blue:#87a9c2; --blue-soft:#e8eff5; --amber:#d8ab63; --amber-soft:#fbf1df; --rose:#bb7b72; --rose-soft:#f6e7e3; --shadow:0 18px 42px rgba(74,82,88,.10); }}
+    :root[data-theme="dark"] {{ color-scheme:dark; --bg:#101820; --panel:#17232c; --panel-soft:#1d2b35; --ink:#e7eff2; --muted:#afbec5; --line:rgba(218,232,238,.18); --sage:#8fbaa3; --sage-soft:#203c30; --blue:#8fb8d1; --blue-soft:#203744; --amber:#dfb96f; --amber-soft:#3c311f; --rose:#d18a81; --rose-soft:#402928; --shadow:0 18px 42px rgba(0,0,0,.34); }}
     * {{ box-sizing:border-box; }} html {{ background:#f8f4ee; }} body {{ margin:0; min-height:100vh; color:var(--ink); background:radial-gradient(circle at top left, rgba(125,163,143,.14), transparent 25%),radial-gradient(circle at top right, rgba(135,169,194,.16), transparent 28%),linear-gradient(180deg,#faf7f1 0%,#f2ece3 100%); font:15px/1.65 "Segoe UI Variable Text","Aptos","Segoe UI",sans-serif; }}
     a {{ color:#4f6c7e; text-decoration:none; }} a:hover {{ color:#2f4957; }}
     .shell {{ max-width:1440px; margin:0 auto; padding:28px 22px 56px; }} .page-stack > * + * {{ margin-top:22px; }}
@@ -479,13 +592,13 @@ def html_page(title: str, body: str) -> str:
     .page-topbar {{ display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:14px; }} .brand-mark {{ display:inline-flex; align-items:center; gap:10px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.16em; font-weight:700; }} .brand-dot {{ width:12px; height:12px; border-radius:999px; background:linear-gradient(135deg,#9ec0ab,#83a9c8); box-shadow:0 0 0 6px rgba(125,163,143,.10); }}
     .kicker {{ text-transform:uppercase; letter-spacing:.14em; color:#698576; font-size:11px; margin-bottom:12px; font-weight:700; }} h1,h2,h3 {{ margin:0; letter-spacing:-.03em; color:var(--ink); }} h1 {{ font-size:46px; line-height:1.02; max-width:12ch; margin-bottom:14px; font-weight:650; }} h2 {{ font-size:24px; margin-bottom:14px; font-weight:620; }} h3 {{ font-size:12px; text-transform:uppercase; letter-spacing:.12em; color:var(--muted); margin-bottom:12px; font-weight:700; }} .lede {{ margin:0; max-width:64ch; font-size:16px; color:#5f6e76; }}
     .hero-actions,.task-actions,.subnav {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }} .hero-actions {{ margin-top:24px; }} .hero-meta {{ display:flex; gap:10px; flex-wrap:wrap; margin-top:18px; color:var(--muted); font-size:13px; }} .csf-map {{ max-width:1260px; margin:0 auto; text-align:center; }} .app-masthead {{ display:flex; align-items:baseline; justify-content:space-between; gap:16px; margin-bottom:14px; text-align:left; }} .app-title-context {{ display:flex; align-items:center; gap:14px; min-width:0; flex-wrap:wrap; }} .app-title {{ color:var(--ink); font-size:19px; font-weight:700; letter-spacing:-.02em; }} .csf-profile-selector {{ margin-left:48px; }} .csf-profile-selector label {{ display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; font-weight:700; white-space:nowrap; }} .csf-profile-selector select {{ max-width:240px; padding:5px 24px 5px 8px; border:1px solid rgba(34,50,59,.16); border-radius:8px; background:#fff; color:var(--ink); font:inherit; font-weight:600; }} .app-header-actions {{ display:flex; align-items:center; }} .app-home-link {{ display:inline-flex; align-items:center; justify-content:center; padding:8px 13px; border:1px solid rgba(34,50,59,.12); border-radius:999px; background:rgba(255,255,255,.82); color:var(--ink); font-size:12px; font-weight:700; text-decoration:none; white-space:nowrap; }} .app-home-link:hover {{ color:#315345; background:var(--sage-soft); }} .csf-map .kicker {{ margin-bottom:16px; }} .csf-action-bar {{ display:grid; gap:28px; grid-template-columns:repeat(6,minmax(0,1fr)); }} .csf-action {{ position:relative; display:grid; align-content:center; gap:7px; min-height:118px; padding:18px 14px; border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,.68); color:var(--ink); text-align:center; }} .csf-action:not(:last-child)::after {{ content:"→"; position:absolute; z-index:2; top:50%; right:-23px; transform:translateY(-50%); width:18px; color:#698576; font-size:18px; font-weight:700; line-height:1; pointer-events:none; }} .csf-action span {{ font-size:12px; font-weight:750; text-transform:uppercase; letter-spacing:.08em; }} .csf-action small {{ color:var(--muted); font-size:11px; line-height:1.35; }} .csf-action.csf-function-govern {{ --csf-function-color:#f9f49d; --csf-function-ink:#3b3b1f; }} .csf-action.csf-function-identify {{ --csf-function-color:#4bb2e0; --csf-function-ink:#163b4d; }} .csf-action.csf-function-protect {{ --csf-function-color:#9292ea; --csf-function-ink:#292957; }} .csf-action.csf-function-detect {{ --csf-function-color:#fab746; --csf-function-ink:#563914; }} .csf-action.csf-function-respond {{ --csf-function-color:#f97367; --csf-function-ink:#5a2722; }} .csf-action.csf-function-recover {{ --csf-function-color:#7df49f; --csf-function-ink:#1d4c2b; }} .csf-action[class*="csf-function-"] {{ background:color-mix(in srgb,var(--csf-function-color) 24%,white); border-color:color-mix(in srgb,var(--csf-function-color) 70%,#a7a9a7); color:var(--csf-function-ink); }} .csf-action[class*="csf-function-"]:hover {{ background:color-mix(in srgb,var(--csf-function-color) 42%,white); border-color:var(--csf-function-color); color:var(--csf-function-ink); }} .csf-action[class*="csf-function-"].active {{ background:var(--csf-function-color); border-color:var(--csf-function-color); box-shadow:0 12px 24px color-mix(in srgb,var(--csf-function-color) 36%,transparent); color:var(--csf-function-ink); }} .csf-guidance {{ display:grid; gap:6px; margin-top:14px; padding:14px; border-radius:16px; background:var(--blue-soft); border:1px solid rgba(135,169,194,.28); color:#415b6a; text-align:left; }} .csf-guidance strong {{ color:#2f4957; }} .csf-utilities {{ justify-content:center; margin-top:14px; }}
-    .grid {{ display:grid; gap:18px; }} .grid.two {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .grid.three {{ grid-template-columns:repeat(3,minmax(0,1fr)); }} .dashboard-start-tiles {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); grid-auto-rows:1fr; gap:18px; }} .dashboard-start-tiles > .panel {{ height:100%; box-sizing:border-box; }} .stack > * + * {{ margin-top:14px; }} .cards {{ display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); }}
+    .grid {{ display:grid; gap:18px; }} .grid.two {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .grid.three {{ grid-template-columns:repeat(3,minmax(0,1fr)); }} .dashboard-start-tiles {{ display:grid; grid-template-columns:1fr; grid-auto-rows:1fr; gap:18px; }} .dashboard-start-tiles > .panel {{ height:100%; box-sizing:border-box; }} .stack > * + * {{ margin-top:14px; }} .cards {{ display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); }}
     .metric,.focus-card,.care-tile,.task,.activity-item,.mood-chip {{ background:rgba(255,255,255,.76); border:1px solid rgba(34,50,59,.10); border-radius:18px; }} .metric {{ padding:16px; min-height:104px; }} .metric .label,.mood-chip .label {{ color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.12em; font-weight:700; }} .metric .value {{ font-size:26px; font-weight:650; margin-top:7px; color:var(--ink); overflow-wrap:anywhere; }} .metric .value .metric-time-sub {{ display:block; font-size:15px; line-height:1.25; margin-top:5px; color:#607079; font-weight:500; }}
     .status-pill {{ display:inline-flex; align-items:center; gap:8px; white-space:nowrap; padding:8px 13px; border-radius:999px; font-size:12px; font-weight:700; border:1px solid transparent; }} .status-ok,.status-Healthy {{ background:var(--sage-soft); color:#4d705d; border-color:rgba(125,163,143,.35); }} .status-medium,.status-Warning {{ background:var(--amber-soft); color:#8a6735; border-color:rgba(216,171,99,.32); }} .status-high,.status-High {{ background:var(--rose-soft); color:#90564c; border-color:rgba(187,123,114,.28); }} .status-info {{ background:var(--blue-soft); color:#58758a; border-color:rgba(135,169,194,.32); }}
     .btn {{ display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:10px 16px; border-radius:999px; border:1px solid rgba(34,50,59,.12); background:rgba(255,255,255,.82); color:var(--ink); font:inherit; cursor:pointer; transition:transform .14s ease, box-shadow .14s ease; }} .btn:hover {{ transform:translateY(-1px); box-shadow:0 12px 24px rgba(80,88,94,.10); }} .btn:disabled {{ cursor:not-allowed; opacity:.52; }} .btn:disabled:hover {{ transform:none; box-shadow:none; }} .btn.primary {{ background:linear-gradient(135deg,#8eb39d,#86a9c2); color:#fff; border-color:transparent; font-weight:700; }} .btn.danger {{ color:#904f48; border-color:rgba(187,123,114,.35); background:rgba(246,231,227,.62); }} .btn.active {{ background:#eef3ee; border-color:rgba(125,163,143,.28); }} .csf-profile-save.is-dirty {{ background:var(--amber-soft); border-color:rgba(216,171,99,.60); color:#765526; font-weight:700; }} .csf-profile-save.is-saved {{ background:var(--sage-soft); border-color:rgba(125,163,143,.60); color:#315345; font-weight:700; }}
     .csf-outcome-history-cell {{ padding:0 12px 12px; background:rgba(232,240,234,.34); }} .csf-outcome-history {{ width:100%; box-sizing:border-box; max-height:96px; overflow-y:auto; border:1px solid rgba(34,50,59,.10); border-radius:10px; background:rgba(255,255,255,.75); }} .csf-outcome-history-item {{ display:grid; grid-template-columns:205px minmax(340px,1.25fr) minmax(300px,2fr) minmax(180px,1fr); gap:14px; width:100%; box-sizing:border-box; padding:7px 10px; border-bottom:1px solid rgba(34,50,59,.07); font-size:12px; }} .csf-outcome-history-item strong {{ white-space:nowrap; }} .csf-outcome-history-item:last-child {{ border-bottom:0; }}
-    .profile-audit-log {{ table-layout:fixed; }} .profile-audit-log .audit-recorded-at {{ width:190px; white-space:nowrap; }} .profile-audit-log .audit-recorded-by {{ width:110px; }} .profile-audit-log .audit-outcome {{ width:85px; }} .profile-audit-log .audit-change {{ width:360px; white-space:nowrap; }} .profile-audit-log .audit-reason {{ width:23%; }} .profile-audit-log .audit-evidence {{ width:auto; }}
-    .profile-tailoring-head {{ display:flex; align-items:end; justify-content:space-between; gap:16px; margin-top:8px; }} .profile-tailoring-head h3 {{ margin:0; }}
+    .profile-audit-log {{ table-layout:fixed; }} .profile-audit-log .audit-recorded-at {{ width:190px; white-space:nowrap; }} .profile-audit-log .audit-recorded-by {{ width:110px; }} .profile-audit-log .audit-outcome {{ width:85px; }} .profile-audit-log .audit-change {{ width:440px; white-space:nowrap; }} .profile-audit-log .audit-reason {{ width:23%; }} .profile-audit-log .audit-evidence {{ width:auto; }}
+    .profile-page-head {{ display:flex; align-items:start; justify-content:space-between; gap:16px; }} .profile-page-head .kicker {{ margin-bottom:6px; }} .profile-page-head h2 {{ margin-bottom:0; }} .profile-tailoring-head {{ display:flex; align-items:end; justify-content:space-between; gap:16px; margin-top:8px; }} .profile-tailoring-head h3 {{ margin:0; }}
     .mini,.focus-meta,.task-meta {{ color:var(--muted); font-size:13px; }} .flash {{ padding:13px 15px; border-radius:16px; border:1px solid rgba(135,169,194,.22); background:rgba(232,239,245,.9); color:#536b7d; }}
     .focus-card {{ padding:18px; }} .focus-card.calm,.care-tile.good {{ background:linear-gradient(180deg,rgba(232,240,234,.92),rgba(255,255,255,.84)); }} .focus-card.warning,.care-tile.care {{ background:linear-gradient(180deg,rgba(251,241,223,.94),rgba(255,255,255,.84)); }} .focus-card.critical,.care-tile.serious {{ background:linear-gradient(180deg,rgba(246,231,227,.95),rgba(255,255,255,.84)); }} .focus-card.report {{ background:linear-gradient(180deg,rgba(232,239,245,.92),rgba(255,255,255,.84)); }} .focus-label {{ color:#698576; text-transform:uppercase; letter-spacing:.12em; font-size:11px; font-weight:700; margin-bottom:8px; }} .focus-title {{ font-size:24px; font-weight:630; margin-bottom:6px; }} .focus-copy {{ color:#475861; margin-bottom:8px; }}
     .care-list,.activity-list {{ display:grid; gap:12px; }} .care-tile {{ padding:16px 18px; }} .care-tile h4 {{ margin:0 0 6px; font-size:17px; font-weight:620; }} .care-tile p {{ margin:0; color:#54636b; }} .activity-item {{ display:grid; gap:4px; padding:14px 16px; }}
@@ -501,12 +614,21 @@ def html_page(title: str, body: str) -> str:
     @media (max-width:1100px) {{ .hero,.grid.two,.grid.three {{ grid-template-columns:1fr; }} .csf-action-bar {{ grid-template-columns:repeat(3,minmax(0,1fr)); }} .csf-action:not(:last-child)::after {{ display:none; }} h1 {{ max-width:none; font-size:38px; }} }} @media (max-width:760px) {{ .shell {{ padding:18px 14px 40px; }} .panel,.hero-main {{ padding:20px; }} .csf-action-bar,.dashboard-start-tiles {{ grid-template-columns:1fr; }} .csf-action {{ min-height:104px; }} .task-head,.page-topbar,.csf-explorer-head {{ flex-direction:column; align-items:flex-start; }} .csf-explorer-list {{ grid-auto-rows:auto; }} .csf-explorer-row {{ grid-template-columns:1fr; height:auto; min-height:104px; gap:4px; }} .kv {{ grid-template-columns:1fr; }} }}
     .csf-explorer-composite {{ grid-template-rows:auto auto minmax(0,1fr); overflow:hidden; }} .csf-explorer-section {{ min-height:0; }} .csf-explorer-section + .csf-explorer-section {{ padding-top:10px; border-top:1px solid rgba(34,50,59,.10); }} .csf-explorer-composite .csf-selection-list {{ display:grid; grid-template-rows:auto minmax(0,1fr); overflow:hidden; }} .csf-example-region {{ overflow:auto; overscroll-behavior:contain; }} .csf-example-region .csf-outcome-state {{ padding:6px 14px 12px; color:var(--muted); font-size:13px; }} .csf-example-region .csf-outcome-state > :first-child {{ margin-top:0; }} .csf-example-region .csf-outcome-state > :last-child {{ margin-bottom:0; }} .workspace-scroll.csf-explorer-workspace {{ display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:repeat(2,minmax(0,1fr)); gap:18px; }} .workspace-scroll.csf-explorer-workspace > * + * {{ margin-top:0; }} @media (min-width:1000px) {{ .workspace-scroll .csf-explorer-composite > .csf-selection-list:first-child {{ height:116px; grid-template-rows:18px 98px; }} .workspace-scroll .csf-explorer-composite > .csf-selection-list:first-child .kicker {{ margin-bottom:0; line-height:18px; }} .workspace-scroll .csf-explorer-composite > .csf-selection-list:nth-child(2) {{ height:127px; grid-template-rows:18px 98px; }} .workspace-scroll .csf-explorer-composite > .csf-selection-list:nth-child(2) .kicker {{ margin-bottom:0; line-height:18px; }} .workspace-scroll .csf-selection-list .csf-explorer-list[data-explorer-list="categories"] {{ grid-auto-rows:95px; height:95px; max-height:95px; margin-top:3px; }} .csf-explorer-list[data-explorer-list="categories"] .csf-explorer-row {{ height:95px; }} .workspace-scroll .csf-selection-list .csf-explorer-list[data-explorer-list="subcategories"] {{ grid-auto-rows:95px; height:95px; max-height:95px; margin-top:3px; }} .csf-explorer-list[data-explorer-list="subcategories"] .csf-explorer-row {{ height:95px; }} }} @media (min-width:1000px) and (max-height:999px) {{ .workspace-scroll.csf-explorer-workspace {{ grid-template-rows:repeat(2,534px); }} .workspace-scroll.csf-explorer-workspace > .csf-explorer {{ height:534px; min-height:0; }} .workspace-scroll.csf-explorer-workspace > .csf-explorer:not(.csf-explorer-composite) {{ overflow:auto; overscroll-behavior:contain; }} }} @media (min-width:1000px) and (min-height:1000px) {{ .workspace-scroll.csf-explorer-workspace {{ grid-template-rows:repeat(2,minmax(0,1fr)); grid-auto-rows:unset; }} .workspace-scroll.csf-explorer-workspace > .csf-explorer-composite {{ grid-row:auto; min-height:0; grid-template-rows:116px 127px minmax(0,1fr); overflow:hidden !important; }} }}
     #csf-evidence-workspace-title {{ margin-bottom:0; line-height:18px; }} .csf-explorer.csf-evidence-workspace {{ align-content:start; gap:3px; }} .csf-assessment-prototype {{ display:grid; gap:6px; }} .csf-assessment-prototype > .kicker {{ margin:0; }} .csf-assessment-context {{ display:grid; gap:4px; }} .csf-assessment-context > .mini {{ margin:0; }} .csf-assessment-example {{ padding:8px 10px; border-left:3px solid rgba(125,163,143,.58); background:rgba(232,240,234,.48); }} .csf-assessment-example p,.csf-assessment-example ul {{ margin:0; color:var(--muted); font-size:13px; }} .csf-assessment-example ul {{ padding-left:18px; }} .csf-assessment-block {{ padding:11px 13px; border:1px solid rgba(34,50,59,.10); border-radius:12px; background:rgba(255,255,255,.76); }} .csf-assessment-block strong {{ display:block; margin-bottom:4px; font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:#475861; }} .csf-assessment-block p {{ margin:0; color:var(--muted); font-size:13px; }} .csf-assessment-comparison {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }} .csf-assessment-comparison .csf-assessment-block {{ min-width:0; }} .csf-response-options {{ display:flex; flex-wrap:wrap; gap:7px; margin:7px 0; }} .csf-response-options .csf-assessment-choice {{ padding:4px 8px; border:1px solid rgba(34,50,59,.14); border-radius:999px; color:#53636b; font:inherit; font-size:12px; background:rgba(255,255,255,.82); cursor:pointer; }} .csf-response-options .csf-assessment-choice:hover {{ border-color:rgba(93,127,148,.56); }} .csf-response-options .csf-assessment-choice.active {{ color:#315345; border-color:rgba(125,163,143,.60); background:var(--sage-soft); font-weight:700; }} .csf-profile-assessment .csf-assessment-choice:disabled {{ cursor:default; opacity:1; }} .csf-record-list {{ display:grid; gap:6px; height:72px; overflow:auto; padding-right:4px; }} .csf-record-list-head {{ display:flex; align-items:center; justify-content:space-between; gap:8px; }} .csf-record-list-head strong {{ margin:0; }} .csf-add-record {{ display:grid; place-items:center; width:24px; height:24px; border:1px solid rgba(93,127,148,.45); border-radius:50%; color:#315345; font-size:19px; line-height:1; text-decoration:none; }} .csf-add-record:hover {{ background:var(--sage-soft); }} .csf-record-row {{ display:grid; gap:2px; padding:8px 10px; border:1px solid rgba(34,50,59,.10); border-radius:10px; background:rgba(255,255,255,.68); color:var(--ink); text-decoration:none; }} .csf-record-row:hover {{ background:var(--blue-soft); }} .csf-record-row span {{ color:var(--muted); font-size:12px; }} .csf-record-empty {{ margin:0; color:var(--muted); font-size:13px; }} .csf-community-profile-list {{ display:grid; gap:0; }} .csf-community-profile-row {{ display:grid; gap:2px; padding:7px 0; border-bottom:1px solid rgba(34,50,59,.10); color:var(--ink); text-decoration:none; }} .csf-community-profile-row:first-child {{ border-top:1px solid rgba(34,50,59,.10); }} .csf-community-profile-row strong {{ font-size:13px; }} .csf-community-profile-row span {{ color:var(--muted); font-size:12px; }} .csf-community-profile-row:hover {{ color:#315345; background:rgba(232,240,234,.36); }} .csf-entry-form {{ display:grid; gap:12px; }} .csf-entry-form label {{ display:grid; gap:4px; color:#475861; font-size:13px; font-weight:700; }} .csf-entry-form input,.csf-entry-form select,.csf-entry-form textarea {{ width:100%; box-sizing:border-box; padding:8px 10px; border:1px solid rgba(34,50,59,.18); border-radius:8px; background:#fff; font:inherit; font-weight:400; }} .csf-entry-form textarea {{ min-height:76px; resize:vertical; }} .csf-entry-form .mini {{ margin:0; }} @media (max-width:560px) {{ .csf-assessment-comparison {{ grid-template-columns:1fr; }} }}
-    .csf-record-list {{ grid-auto-rows:56px; height:56px; scroll-snap-type:y mandatory; }} .csf-record-row {{ height:56px; box-sizing:border-box; overflow:hidden; scroll-snap-align:start; }} .csf-profile-picker-list.csf-record-list {{ display:grid; gap:0; grid-auto-rows:32px; height:160px !important; max-height:160px !important; padding:0; border:1px solid rgba(34,50,59,.12); border-radius:8px; background:rgba(255,255,255,.55); }} .csf-profile-choice {{ display:flex; align-items:center; height:32px; box-sizing:border-box; padding:0 10px; color:var(--ink); cursor:pointer; scroll-snap-align:start; }} .csf-profile-choice + .csf-profile-choice {{ border-top:1px solid rgba(34,50,59,.08); }} .csf-profile-choice input[type="radio"] {{ position:absolute; inline-size:1px; block-size:1px; opacity:0; }} .csf-profile-choice:has(input:checked) {{ box-shadow:inset 3px 0 0 #7da38f; background:var(--sage-soft); color:#315345; font-weight:700; }} .csf-profile-choice:has(input:focus-visible) {{ outline:2px solid rgba(135,169,194,.72); outline-offset:-2px; }} .csf-add-record {{ width:auto; height:auto; border:0; border-radius:0; background:transparent; font-weight:700; }} .csf-add-record:hover {{ background:transparent; color:#1e4c3a; }} .modal-head-actions {{ display:flex; align-items:center; gap:14px; flex:none; }} .modal-head-actions .csf-add-record {{ font-size:24px; line-height:1; }} .csf-status-options {{ display:flex; flex-wrap:wrap; gap:7px; margin:0; padding:0; border:0; }} .csf-status-options legend {{ width:100%; margin-bottom:4px; color:#475861; font-size:13px; font-weight:700; }} .csf-status-choice {{ display:flex !important; align-items:center; gap:5px; padding:4px 8px; border:1px solid rgba(34,50,59,.14); border-radius:999px; color:#53636b !important; font-weight:400 !important; }} .csf-status-choice:has(input:checked) {{ color:#315345 !important; border-color:rgba(125,163,143,.60); background:var(--sage-soft); font-weight:700 !important; }} .csf-status-choice input {{ width:auto !important; margin:0; }} .modal-head {{ padding:14px 18px; }} .modal-head > div {{ min-width:0; }} .csf-modal-outcome {{ max-width:680px; margin:2px 0 0; font-size:17px; line-height:1.25; }} .csf-modal-target-context {{ display:grid; gap:3px; margin-top:8px; padding:7px 9px; border-left:3px solid #7da38f; border-radius:6px; background:rgba(232,240,234,.56); color:#475861; font-size:12px; line-height:1.35; }} .csf-modal-target-context strong {{ color:#315345; }} .modal-body {{ padding:14px 18px; }} .csf-entry-form {{ gap:8px; }} .csf-entry-form textarea {{ min-height:62px; }} .csf-linked-control {{ display:grid; gap:3px; padding:8px 10px; border:1px solid rgba(93,127,148,.32); border-left:3px solid #5d7f94; border-radius:8px; background:rgba(232,239,245,.54); color:#42555f; font-size:12px; }} .csf-linked-control strong {{ color:#41525a; font-size:12px; text-transform:uppercase; letter-spacing:.05em; }} .csf-linked-control.manual {{ border-left-color:#9b8a76; background:rgba(248,245,239,.72); }}
-    .csf-control-picker {{ display:grid; gap:7px; margin:0; padding:11px; border:1px solid rgba(34,50,59,.14); border-radius:10px; }} .csf-control-picker legend {{ padding:0 3px; color:#475861; font-size:13px; font-weight:700; }} .csf-control-picker legend span {{ color:var(--muted); font-weight:400; }} .csf-control-picker .mini {{ margin:0; }} .csf-control-list {{ display:grid; gap:6px; max-height:246px; overflow:auto; padding-right:4px; }} .csf-mapped-control-list,.csf-action-evidence-list {{ max-height:100px; }} .csf-control-choice {{ display:grid !important; grid-template-columns:auto minmax(0,1fr); align-items:start; gap:9px; padding:9px 10px; border:1px solid rgba(34,50,59,.12); border-radius:8px; background:rgba(255,255,255,.68); cursor:pointer; }} .csf-control-choice > input {{ width:auto !important; margin:3px 0 0 !important; }} .csf-control-content {{ display:grid; gap:3px; min-width:0; color:var(--muted); font-weight:400; }} .csf-control-choice strong {{ color:var(--ink); font-size:12px; }} .csf-control-title {{ color:#53636b; font-size:12px; }} .csf-control-interpretation,.csf-control-action {{ margin:3px 0 0; color:#586a73; font-size:12px; line-height:1.38; }} .csf-control-action {{ color:#456557; }} .csf-control-interpretation b,.csf-control-action b {{ color:#41525a; }} .csf-control-official {{ margin-top:3px; color:var(--muted); font-size:11px; }} .csf-control-official summary {{ cursor:pointer; color:#4f6c7e; }} .csf-control-official p {{ margin:5px 0 0; line-height:1.38; }} .csf-control-choice small {{ color:#7b6a61; font-size:11px; }} .csf-control-choice:has(input:checked) {{ border-color:rgba(125,163,143,.60); background:var(--sage-soft); }} .csf-control-choice.unavailable {{ opacity:.48; cursor:not-allowed; background:rgba(235,232,226,.72); }}
+    .csf-record-list {{ grid-auto-rows:56px; height:56px; scroll-snap-type:y mandatory; }} .csf-record-row {{ height:56px; box-sizing:border-box; overflow:hidden; scroll-snap-align:start; }} .csf-plan-unplanned-list {{ grid-auto-rows:104px; height:104px; }} .csf-plan-unplanned-list .csf-record-row {{ height:104px; }} .csf-plan-assignment {{ display:flex; align-items:center; gap:8px; }} .csf-plan-assignment label {{ display:flex; align-items:center; gap:6px; min-width:0; color:var(--muted); font-size:12px; }} .csf-plan-assignment select {{ min-width:170px; max-width:320px; }} .csf-profile-picker-list.csf-record-list {{ display:grid; gap:0; grid-auto-rows:32px; height:160px !important; max-height:160px !important; padding:0; border:1px solid rgba(34,50,59,.12); border-radius:8px; background:rgba(255,255,255,.55); }} .csf-profile-choice {{ display:flex; align-items:center; height:32px; box-sizing:border-box; padding:0 10px; color:var(--ink); cursor:pointer; scroll-snap-align:start; }} .csf-profile-choice + .csf-profile-choice {{ border-top:1px solid rgba(34,50,59,.08); }} .csf-profile-choice input[type="radio"] {{ position:absolute; inline-size:1px; block-size:1px; opacity:0; }} .csf-profile-choice:has(input:checked) {{ box-shadow:inset 3px 0 0 #7da38f; background:var(--sage-soft); color:#315345; font-weight:700; }} .csf-profile-choice:has(input:focus-visible) {{ outline:2px solid rgba(135,169,194,.72); outline-offset:-2px; }} .csf-add-record {{ width:auto; height:auto; border:0; border-radius:0; background:transparent; font-weight:700; }} .csf-add-record:hover {{ background:transparent; color:#1e4c3a; }} .modal-head-actions {{ display:flex; align-items:center; gap:14px; flex:none; }} .modal-head-actions .csf-add-record {{ font-size:24px; line-height:1; }} .csf-status-options {{ display:flex; flex-wrap:wrap; gap:7px; margin:0; padding:0; border:0; }} .csf-status-options legend {{ width:100%; margin-bottom:4px; color:#475861; font-size:13px; font-weight:700; }} .csf-status-choice {{ display:flex !important; align-items:center; gap:5px; padding:4px 8px; border:1px solid rgba(34,50,59,.14); border-radius:999px; color:#53636b !important; font-weight:400 !important; }} .csf-status-choice:has(input:checked) {{ color:#315345 !important; border-color:rgba(125,163,143,.60); background:var(--sage-soft); font-weight:700 !important; }} .csf-status-choice input {{ width:auto !important; margin:0; }} .modal-head {{ padding:14px 18px; }} .modal-head > div {{ min-width:0; }} .csf-modal-outcome {{ max-width:680px; margin:2px 0 0; font-size:17px; line-height:1.25; }} .csf-modal-target-context {{ display:grid; gap:3px; margin-top:8px; padding:7px 9px; border-left:3px solid #7da38f; border-radius:6px; background:rgba(232,239,245,.54); color:#475861; font-size:12px; line-height:1.35; }} .csf-modal-target-context strong {{ color:#315345; }} .modal-body {{ padding:14px 18px; }} .csf-entry-form {{ gap:8px; }} .csf-entry-form textarea {{ min-height:62px; }} .csf-linked-control {{ display:grid; gap:3px; padding:8px 10px; border:1px solid rgba(93,127,148,.32); border-left:3px solid #5d7f94; border-radius:8px; background:rgba(232,239,245,.54); color:#42555f; font-size:12px; }} .csf-linked-control strong {{ color:#41525a; font-size:12px; text-transform:uppercase; letter-spacing:.05em; }} .csf-linked-control.manual {{ border-left-color:#9b8a76; background:rgba(248,245,239,.72); }}
+    .csf-plan-summary-list {{ grid-auto-rows:88px; height:88px; }} .csf-plan-summary-list .csf-record-row {{ height:88px; }} .csf-plan-assigned-list,.csf-plan-history-list {{ grid-auto-rows:104px; height:104px; }} .csf-plan-assigned-list .csf-record-row,.csf-plan-history-list .csf-record-row {{ height:104px; }} .csf-plan-assigned-action {{ grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:10px; }} .csf-plan-assigned-action > a {{ display:grid; gap:2px; min-width:0; color:var(--ink); text-decoration:none; }} .csf-plan-assigned-action > a:hover {{ color:#315345; }}
+    .csf-control-picker {{ display:grid; gap:7px; margin:0; padding:11px; border:1px solid rgba(34,50,59,.14); border-radius:10px; }} .csf-control-picker legend {{ padding:0 3px; color:#475861; font-size:13px; font-weight:700; }} .csf-control-picker legend span {{ color:var(--muted); font-weight:400; }} .csf-control-picker .mini {{ margin:0; }} .csf-control-list {{ display:grid; gap:6px; max-height:246px; overflow:auto; padding-right:4px; }} .csf-mapped-control-list {{ height:100px; max-height:100px; }} .csf-action-evidence-list {{ grid-auto-rows:88px; height:88px; max-height:88px; }} .csf-action-evidence-list .csf-control-choice {{ height:88px; box-sizing:border-box; overflow:hidden; }} .csf-action-update-evidence-list {{ grid-auto-rows:64px; height:64px; max-height:64px; }} .csf-action-update-evidence-list .csf-control-choice {{ height:64px; box-sizing:border-box; overflow:hidden; }} .csf-control-choice {{ display:grid !important; grid-template-columns:auto minmax(0,1fr); align-items:start; gap:9px; padding:9px 10px; border:1px solid rgba(34,50,59,.12); border-radius:8px; background:rgba(255,255,255,.68); cursor:pointer; }} .csf-control-choice > input {{ width:auto !important; margin:3px 0 0 !important; }} .csf-control-content {{ display:grid; gap:3px; min-width:0; color:var(--muted); font-weight:400; }} .csf-control-choice strong {{ color:var(--ink); font-size:12px; }} .csf-control-title {{ color:#53636b; font-size:12px; }} .csf-control-interpretation,.csf-control-action {{ margin:3px 0 0; color:#586a73; font-size:12px; line-height:1.38; }} .csf-control-action {{ color:#456557; }} .csf-control-interpretation b,.csf-control-action b {{ color:#41525a; }} .csf-control-official {{ margin-top:3px; color:#7b6a61; font-size:11px; }} .csf-control-official summary {{ cursor:pointer; color:#4f6c7e; }} .csf-control-official p {{ margin:5px 0 0; line-height:1.38; }} .csf-control-choice small {{ color:#7b6a61; font-size:11px; }} .csf-control-choice:has(input:checked) {{ border-color:rgba(125,163,143,.60); background:var(--sage-soft); }} .csf-control-choice.unavailable {{ opacity:.48; cursor:not-allowed; background:rgba(235,232,226,.72); }}
     .csf-why-matters {{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 10px; border-left:3px solid rgba(93,127,148,.60); background:rgba(232,239,245,.55); }} .csf-why-matters .kicker {{ margin:0 0 2px; }} .csf-why-matters p {{ margin:0; color:#4b606b; font-size:13px; line-height:1.45; }} .csf-information-flow-button {{ flex:none; padding:6px 9px; border:1px solid rgba(93,127,148,.40); border-radius:999px; background:rgba(255,255,255,.76); color:#38586b; font:inherit; font-size:12px; font-weight:700; cursor:pointer; }} .csf-information-flow-button:hover {{ background:var(--blue-soft); }} .csf-information-flow-dialog {{ width:min(1080px,100%); }} .csf-information-flow-body {{ display:grid; gap:14px; }} .csf-information-flow-body section {{ display:grid; gap:7px; }} .csf-information-flow-body h3 {{ margin:0; }} .csf-flow-graph {{ display:grid; grid-template-columns:minmax(140px,.85fr) 62px minmax(180px,1fr) 62px minmax(240px,1.45fr); align-items:center; gap:8px; padding:10px; border:1px solid rgba(34,50,59,.10); border-radius:14px; background:rgba(248,245,239,.52); }} .csf-flow-node,.csf-flow-consumer {{ display:grid; gap:2px; padding:8px; border:1px solid rgba(34,50,59,.12); border-radius:10px; background:rgba(255,255,255,.78); }} .csf-flow-node.source {{ border-left:3px solid #5d7f94; }} .csf-flow-node.information {{ border-left:3px solid #7da38f; background:var(--sage-soft); }} .csf-flow-node strong,.csf-flow-consumer strong {{ font-size:12px; line-height:1.25; }} .csf-flow-node span,.csf-flow-consumer span,.csf-flow-consumer p {{ margin:0; color:var(--muted); font-size:11px; line-height:1.25; }} .csf-flow-consumers {{ display:grid; gap:4px; }} .csf-flow-consumer {{ padding:5px 8px; }} .csf-flow-consumer span {{ color:#456557; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }} .csf-flow-consumer p {{ display:-webkit-box; overflow:hidden; -webkit-box-orient:vertical; -webkit-line-clamp:2; }} .csf-flow-arrow {{ display:grid; grid-template-columns:auto 1fr; align-items:center; gap:4px; color:#648072; font-size:11px; white-space:nowrap; }} .csf-flow-arrow b {{ font-size:22px; line-height:1; font-weight:500; }} @media (max-width:760px) {{ .csf-why-matters {{ align-items:flex-start; flex-direction:column; }} .csf-flow-graph,.csf-flow-graph.input {{ grid-template-columns:1fr; }} .csf-flow-arrow {{ grid-template-columns:auto auto; }} .csf-flow-arrow b {{ transform:rotate(90deg); justify-self:start; }} }}
-    .csf-assessment-inline {{ display:flex; align-items:center; gap:8px; min-width:0; }} .csf-assessment-inline > strong {{ flex:none; margin:0; }} .csf-assessment-inline form {{ min-width:0; }} .csf-assessment-inline .csf-response-options {{ margin:0; }} .csf-information-flow-buttons {{ display:flex; flex:none; flex-wrap:wrap; gap:6px; justify-content:flex-end; }}
+    .csf-flow-node.information {{ border-left-color:#71808a; background:rgba(238,242,244,.86); }} .csf-flow-outcome.csf-function-govern {{ --csf-flow-color:#f9f49d; --csf-flow-ink:#3b3b1f; }} .csf-flow-outcome.csf-function-identify {{ --csf-flow-color:#4bb2e0; --csf-flow-ink:#163b4d; }} .csf-flow-outcome.csf-function-protect {{ --csf-flow-color:#9292ea; --csf-flow-ink:#292957; }} .csf-flow-outcome.csf-function-detect {{ --csf-flow-color:#fab746; --csf-flow-ink:#563914; }} .csf-flow-outcome.csf-function-respond {{ --csf-flow-color:#f97367; --csf-flow-ink:#5a2722; }} .csf-flow-outcome.csf-function-recover {{ --csf-flow-color:#7df49f; --csf-flow-ink:#1d4c2b; }} .csf-flow-outcome[class*="csf-function-"] {{ background:color-mix(in srgb,var(--csf-flow-color) 24%,white); border-color:color-mix(in srgb,var(--csf-flow-color) 72%,#a7a9a7); color:var(--csf-flow-ink); }} .csf-flow-node.csf-flow-outcome[class*="csf-function-"].source {{ border-left-color:var(--csf-flow-color); }} .csf-flow-outcome[class*="csf-function-"] strong {{ color:var(--csf-flow-ink); }} .csf-flow-outcome[class*="csf-function-"] span,.csf-flow-outcome[class*="csf-function-"] p {{ color:color-mix(in srgb,var(--csf-flow-ink) 72%,#526068); }} .csf-flow-outcome-link {{ text-decoration:none; cursor:pointer; }} .csf-flow-outcome-link:hover {{ box-shadow:0 0 0 2px color-mix(in srgb,var(--csf-flow-color,#71808a) 52%,transparent); }} .csf-flow-outcome-link:focus-visible {{ outline:2px solid #38586b; outline-offset:2px; }} .csf-assessment-inline {{ display:flex; align-items:center; gap:8px; min-width:0; }} .csf-assessment-inline > strong {{ flex:none; margin:0; }} .csf-assessment-inline form {{ min-width:0; }} .csf-assessment-inline .csf-response-options {{ margin:0; }} .csf-information-flow-buttons {{ display:flex; flex:none; flex-wrap:wrap; gap:6px; justify-content:flex-end; }}
     .csf-explorer-composite.csf-function-govern {{ --csf-workspace-color:#f9f49d; --csf-workspace-ink:#3b3b1f; }} .csf-explorer-composite.csf-function-identify {{ --csf-workspace-color:#4bb2e0; --csf-workspace-ink:#163b4d; }} .csf-explorer-composite.csf-function-protect {{ --csf-workspace-color:#9292ea; --csf-workspace-ink:#292957; }} .csf-explorer-composite.csf-function-detect {{ --csf-workspace-color:#fab746; --csf-workspace-ink:#563914; }} .csf-explorer-composite.csf-function-respond {{ --csf-workspace-color:#f97367; --csf-workspace-ink:#5a2722; }} .csf-explorer-composite.csf-function-recover {{ --csf-workspace-color:#7df49f; --csf-workspace-ink:#1d4c2b; }} .csf-explorer-composite[class*="csf-function-"] .csf-explorer-row {{ background:color-mix(in srgb,var(--csf-workspace-color) 9%,white); border-color:color-mix(in srgb,var(--csf-workspace-color) 38%,#cbd0cc); }} .csf-explorer-composite[class*="csf-function-"] .csf-explorer-row:hover {{ background:color-mix(in srgb,var(--csf-workspace-color) 17%,white); border-color:color-mix(in srgb,var(--csf-workspace-color) 72%,#a7a9a7); }} .csf-explorer-composite[class*="csf-function-"] .csf-explorer-row.active {{ background:color-mix(in srgb,var(--csf-workspace-color) 22%,white); border-color:color-mix(in srgb,var(--csf-workspace-color) 72%,#a7a9a7); box-shadow:inset 4px 0 0 var(--csf-workspace-color); }} .csf-explorer-composite[class*="csf-function-"] .csf-explorer-id,.csf-explorer-composite[class*="csf-function-"] .kicker {{ color:var(--csf-workspace-ink); }}
     .csf-guidance.csf-function-govern {{ --csf-guidance-color:#f9f49d; --csf-guidance-ink:#3b3b1f; }} .csf-guidance.csf-function-identify {{ --csf-guidance-color:#4bb2e0; --csf-guidance-ink:#163b4d; }} .csf-guidance.csf-function-protect {{ --csf-guidance-color:#9292ea; --csf-guidance-ink:#292957; }} .csf-guidance.csf-function-detect {{ --csf-guidance-color:#fab746; --csf-guidance-ink:#563914; }} .csf-guidance.csf-function-respond {{ --csf-guidance-color:#f97367; --csf-guidance-ink:#5a2722; }} .csf-guidance.csf-function-recover {{ --csf-guidance-color:#7df49f; --csf-guidance-ink:#1d4c2b; }} .csf-guidance[class*="csf-function-"] {{ background:color-mix(in srgb,var(--csf-guidance-color) 24%,white); border-color:color-mix(in srgb,var(--csf-guidance-color) 72%,#a7a9a7); color:var(--csf-guidance-ink); }} .csf-guidance[class*="csf-function-"] strong {{ color:var(--csf-guidance-ink); }}
+    .csf-plan-form {{ grid-template-columns:repeat(4,minmax(0,1fr)); gap:9px 12px; align-items:start; }} .csf-plan-form .csf-plan-name {{ grid-column:span 2; }} .csf-plan-form .csf-plan-purpose {{ grid-column:span 2; }} .csf-plan-form .csf-plan-rationale {{ grid-column:1 / -1; }} .csf-plan-form textarea {{ min-height:50px; }} .csf-plan-form .task-actions {{ grid-column:1 / -1; margin-top:0; }} .csf-edit-action-compact-text {{ height:38px !important; min-height:38px !important; max-height:38px; resize:none !important; overflow-y:auto; }} .csf-action-planning-row {{ display:grid; grid-template-columns:minmax(0,2fr) minmax(130px,1fr); gap:10px; }} @media (max-width:760px) {{ .csf-plan-form {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .csf-plan-form .csf-plan-name,.csf-plan-form .csf-plan-purpose {{ grid-column:span 2; }} }} @media (max-width:560px) {{ .csf-plan-form {{ grid-template-columns:1fr; }} .csf-plan-form .csf-plan-name,.csf-plan-form .csf-plan-purpose {{ grid-column:auto; }} .csf-action-planning-row {{ grid-template-columns:1fr; }} }}
+    .csf-capability-graph {{ display:grid; grid-template-columns:minmax(210px,1fr) 62px minmax(210px,1fr); align-items:center; gap:8px; padding:10px; border:1px solid rgba(34,50,59,.10); border-radius:14px; background:rgba(248,245,239,.52); }} .csf-capability-graph > p {{ grid-column:1 / -1; margin:0; color:#53636b; font-size:12px; line-height:1.4; }} .csf-capability-graph > p strong {{ display:block; margin-bottom:2px; color:#41525a; font-size:11px; text-transform:uppercase; letter-spacing:.06em; }} @media (max-width:760px) {{ .csf-capability-graph {{ grid-template-columns:1fr; }} .csf-capability-graph > p {{ grid-column:auto; }} }}
+    .app-theme-toggle {{ display:inline-flex; align-items:center; justify-content:center; padding:8px 13px; border:1px solid rgba(34,50,59,.12); border-radius:999px; background:rgba(255,255,255,.82); color:var(--ink); font:inherit; font-size:12px; font-weight:700; cursor:pointer; white-space:nowrap; }} .app-theme-toggle:hover {{ color:#315345; background:var(--sage-soft); }}
+    :root[data-theme="dark"] html {{ background:var(--bg); }} :root[data-theme="dark"] body {{ background:radial-gradient(circle at top left,rgba(87,133,115,.16),transparent 25%),radial-gradient(circle at top right,rgba(91,130,157,.18),transparent 28%),linear-gradient(180deg,#111b23 0%,#0d151c 100%); }} :root[data-theme="dark"] a {{ color:#a9cadd; }} :root[data-theme="dark"] a:hover {{ color:#d8eaf3; }} :root[data-theme="dark"] .panel.soft,:root[data-theme="dark"] .csf-action,:root[data-theme="dark"] .csf-outcome-state,:root[data-theme="dark"] .csf-record-row,:root[data-theme="dark"] .csf-control-choice,:root[data-theme="dark"] .csf-flow-node,:root[data-theme="dark"] .csf-flow-consumer,:root[data-theme="dark"] .app-home-link,:root[data-theme="dark"] .app-theme-toggle,:root[data-theme="dark"] .btn,:root[data-theme="dark"] .csf-profile-selector select {{ background:#1b2933; color:var(--ink); border-color:var(--line); }} :root[data-theme="dark"] .csf-action[class*="csf-function-"] {{ --csf-function-ink:#f2f6f7; }} :root[data-theme="dark"] .csf-explorer-composite[class*="csf-function-"] {{ --csf-workspace-ink:#f2f6f7; }} :root[data-theme="dark"] .csf-action[class*="csf-function-"],:root[data-theme="dark"] .csf-explorer-composite[class*="csf-function-"] .csf-explorer-row,:root[data-theme="dark"] .csf-flow-outcome[class*="csf-function-"] {{ background:color-mix(in srgb,var(--csf-function-color,var(--csf-workspace-color,var(--csf-flow-color,#71808a))) 18%,var(--panel)); }} :root[data-theme="dark"] .csf-explorer-title {{ color:var(--ink); }} :root[data-theme="dark"] .csf-guidance[class*="csf-function-"] {{ --csf-guidance-ink:#f2f6f7; background:color-mix(in srgb,var(--csf-guidance-color) 19%,var(--panel)); color:var(--csf-guidance-ink); }} :root[data-theme="dark"] .csf-guidance[class*="csf-function-"] strong {{ color:var(--csf-guidance-ink); }} :root[data-theme="dark"] .csf-assessment-block,:root[data-theme="dark"] .csf-capability-graph,:root[data-theme="dark"] .csf-flow-graph {{ background:#1b2933; border-color:var(--line); }} :root[data-theme="dark"] .csf-assessment-block strong,:root[data-theme="dark"] .csf-capability-graph > p strong,:root[data-theme="dark"] .csf-capability-graph > p,:root[data-theme="dark"] .csf-why-matters p,:root[data-theme="dark"] .focus-copy {{ color:var(--muted); }} :root[data-theme="dark"] .csf-flow-node.information {{ background:#26323a; }}
+    .csf-current-profile-layout {{ display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:start; gap:18px; }} .csf-current-profile-details {{ display:grid; gap:14px; min-width:0; }} .csf-current-profile-details > * {{ margin:0; }} .csf-current-profile-actions {{ display:grid; justify-items:stretch; gap:10px; min-width:154px; }} .csf-current-profile-actions .btn {{ text-align:center; }} @media (max-width:600px) {{ .csf-current-profile-layout {{ grid-template-columns:1fr; }} .csf-current-profile-actions {{ grid-template-columns:repeat(2,minmax(0,1fr)); min-width:0; }} }}
+    .csf-catalog-columns {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; }} .csf-catalog-column {{ display:grid; align-content:start; gap:10px; min-width:0; }} .csf-catalog-column > * {{ margin:0; }} @media (max-width:600px) {{ .csf-catalog-columns {{ grid-template-columns:1fr; }} }}
+    :root[data-theme="dark"] .csf-why-matters {{ background:#203744; border-left-color:#8fb8d1; }} :root[data-theme="dark"] .csf-why-matters .kicker {{ color:#c6dce7; }} :root[data-theme="dark"] .csf-why-matters p {{ color:#edf5f8; }}
+    @media (min-width:1000px) and (min-height:1000px) {{ .workspace-scroll > .dashboard-start-tiles {{ height:100%; min-height:0; grid-template-rows:repeat(3,minmax(0,1fr)); overflow:hidden; }} .workspace-scroll > .dashboard-start-tiles > .panel {{ min-height:0; overflow:auto; overscroll-behavior:contain; }} }}
   </style>
 </head>
 <body>
@@ -1483,39 +1605,44 @@ def get_sqlite_csf_information_flow(state_db_path: Path, subcategory_id: str) ->
             input_rows = connection.execute(
                 """
                 SELECT item.information_id, item.title, item.description,
-                       use.dependency_kind, use.use_reason,
-                       source.source_subcategory_id, source.source_guidance
-                FROM csf_subcategory_information_uses AS use
-                JOIN csf_information_items AS item ON item.information_id = use.information_id
-                LEFT JOIN csf_subcategory_information_sources AS source ON source.information_id = item.information_id
-                WHERE use.consumer_subcategory_id = ?
-                ORDER BY item.title, source.source_subcategory_id
+                       edge.dependency_kind, edge.use_reason,
+                       edge.source_subcategory_id, edge.external_source_label,
+                       edge.source_guidance
+                FROM csf_information_flow_edges AS edge
+                JOIN csf_information_items AS item ON item.information_id = edge.information_id
+                WHERE edge.consumer_subcategory_id = ?
+                ORDER BY item.title, edge.dependency_kind, edge.source_subcategory_id, edge.external_source_label
                 """,
                 (subcategory,),
             ).fetchall()
             output_rows = connection.execute(
                 """
                 SELECT item.information_id, item.title, item.description,
-                       source.source_guidance, use.consumer_subcategory_id,
-                       use.dependency_kind, use.use_reason
-                FROM csf_subcategory_information_sources AS source
-                JOIN csf_information_items AS item ON item.information_id = source.information_id
-                LEFT JOIN csf_subcategory_information_uses AS use ON use.information_id = item.information_id
-                WHERE source.source_subcategory_id = ?
-                ORDER BY item.title, use.dependency_kind, use.consumer_subcategory_id
+                       edge.source_guidance, edge.consumer_subcategory_id,
+                       edge.dependency_kind, edge.use_reason
+                FROM csf_information_flow_edges AS edge
+                JOIN csf_information_items AS item ON item.information_id = edge.information_id
+                WHERE edge.source_kind = 'subcategory' AND edge.source_subcategory_id = ?
+                ORDER BY item.title, edge.dependency_kind, edge.consumer_subcategory_id
                 """,
                 (subcategory,),
             ).fetchall()
 
             inputs: Dict[str, Dict[str, Any]] = {}
             for row in input_rows:
-                item = inputs.setdefault(str(row["information_id"]), {
+                source_label = str(row["source_subcategory_id"] or "")
+                if not source_label and row["external_source_label"]:
+                    source_label = f'External: {str(row["external_source_label"])}'
+                input_key = "|".join((
+                    str(row["information_id"]), str(row["dependency_kind"]), str(row["use_reason"]),
+                ))
+                item = inputs.setdefault(input_key, {
                     "information_id": str(row["information_id"]), "title": str(row["title"]),
                     "description": str(row["description"]), "dependency_kind": str(row["dependency_kind"]),
                     "use_reason": str(row["use_reason"]), "sources": [],
                 })
-                if row["source_subcategory_id"]:
-                    item["sources"].append({"subcategory_id": str(row["source_subcategory_id"]), "guidance": str(row["source_guidance"] or "")})
+                if source_label:
+                    item["sources"].append({"subcategory_id": source_label, "guidance": str(row["source_guidance"] or "")})
             outputs: Dict[str, Dict[str, Any]] = {}
             for row in output_rows:
                 item = outputs.setdefault(str(row["information_id"]), {
@@ -1525,6 +1652,40 @@ def get_sqlite_csf_information_flow(state_db_path: Path, subcategory_id: str) ->
                 if row["consumer_subcategory_id"]:
                     item["uses"].append({"subcategory_id": str(row["consumer_subcategory_id"]), "dependency_kind": str(row["dependency_kind"]), "reason": str(row["use_reason"] or "")})
             return {"inputs": list(inputs.values()), "outputs": list(outputs.values())}
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error, ValueError):
+        return empty
+
+
+def get_sqlite_csf_capability_context(state_db_path: Path, subcategory_id: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Return product-authored capability context for one CSF outcome."""
+    subcategory = str(subcategory_id or "").strip().upper()
+    empty = {"prerequisites": [], "dependents": []}
+    if not state_db_path.is_file() or not subcategory:
+        return empty
+    try:
+        connection = sqlite3.connect(f"file:{state_db_path.resolve()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            prerequisite_rows = connection.execute(
+                """SELECT prerequisite_subcategory_id, dependency_strength, rationale
+                FROM csf_subcategory_capability_dependencies
+                WHERE dependent_subcategory_id = ?
+                ORDER BY dependency_strength, prerequisite_subcategory_id""",
+                (subcategory,),
+            ).fetchall()
+            dependent_rows = connection.execute(
+                """SELECT dependent_subcategory_id, dependency_strength, rationale
+                FROM csf_subcategory_capability_dependencies
+                WHERE prerequisite_subcategory_id = ?
+                ORDER BY dependency_strength, dependent_subcategory_id""",
+                (subcategory,),
+            ).fetchall()
+            return {
+                "prerequisites": [dict(row) for row in prerequisite_rows],
+                "dependents": [dict(row) for row in dependent_rows],
+            }
         finally:
             connection.close()
     except (OSError, sqlite3.Error, ValueError):
@@ -3251,6 +3412,7 @@ def build_dashboard_model(config: AppConfig, snapshot: Dict[str, Any], message: 
     # the CSF renderer; this model is otherwise deliberately selective.
     model["csf_outcome_records"] = dict(snapshot.get("csf_outcome_records") or {})
     model["csf_information_flow"] = dict(snapshot.get("csf_information_flow") or {})
+    model["csf_capability_context"] = dict(snapshot.get("csf_capability_context") or {})
     model["csf_state_db_path"] = str(snapshot.get("csf_state_db_path") or "")
     return model
 
@@ -3404,6 +3566,7 @@ def render_csf_assessment_prototype(
     record_read_error: str = "",
     reviewed_action_total: int = 0,
     information_flow: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    capability_context: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     allow_record_creation: bool = True,
 ) -> str:
     """Render a non-persistent preview of the method-specific assessment workspace."""
@@ -3474,6 +3637,9 @@ def render_csf_assessment_prototype(
     flow = information_flow or {"inputs": [], "outputs": []}
     flow_inputs = list(flow.get("inputs") or [])
     flow_outputs = list(flow.get("outputs") or [])
+    capabilities = capability_context or {"prerequisites": [], "dependents": []}
+    capability_prerequisites = list(capabilities.get("prerequisites") or [])
+    capability_dependents = list(capabilities.get("dependents") or [])
     selected_catalog_record = csf_catalog.find_official_subcategory(subcategory_id) or {}
     selected_short_description = str(selected_catalog_record.get("short_description") or "").strip()
     selected_label = f'{subcategory_id}: {selected_short_description}' if selected_short_description else subcategory_id
@@ -3483,29 +3649,125 @@ def render_csf_assessment_prototype(
         short_description = str(record.get("short_description") or "").strip()
         return f'{flow_subcategory_id}: {short_description}' if short_description else flow_subcategory_id
 
-    def dependency_label(kind: str) -> str:
-        return {"required_input": "required input", "planning_input": "planning input", "event_input": "event input"}.get(kind, kind.replace("_", " "))
+    def flow_outcome_class(flow_subcategory_id: str) -> str:
+        function_id = str(flow_subcategory_id or "").strip().upper().split(".", 1)[0]
+        return {
+            "GV": "csf-function-govern",
+            "ID": "csf-function-identify",
+            "PR": "csf-function-protect",
+            "DE": "csf-function-detect",
+            "RS": "csf-function-respond",
+            "RC": "csf-function-recover",
+        }.get(function_id, "")
 
+    def flow_outcome_href(flow_subcategory_id: str, viewer: str = "information_flow") -> str:
+        record = csf_catalog.find_official_subcategory(flow_subcategory_id) or {}
+        function_id = str(record.get("function_id") or "").upper()
+        route = {
+            "GV": "/govern", "ID": "/identify", "PR": "/protect",
+            "DE": "/detect", "RS": "/respond", "RC": "/recover",
+        }.get(function_id)
+        if not route:
+            return ""
+        return build_csf_explorer_href(
+            route,
+            str(record.get("category_id") or ""),
+            str(record.get("id") or ""),
+        ) + ("&capabilities=1" if viewer == "capabilities" else "&information_flow=1")
+
+    def flow_outcome_element(class_name: str, flow_subcategory_id: str, content: str, viewer: str = "information_flow") -> str:
+        href = flow_outcome_href(flow_subcategory_id, viewer)
+        classes = f'{class_name} {flow_outcome_class(flow_subcategory_id)}'
+        if href:
+            return f'<a class="{esc(classes)} csf-flow-outcome-link" data-csf-route href="{esc(href)}" title="Open this outcome’s information flow">{content}</a>'
+        return f'<div class="{esc(classes)}">{content}</div>'
+
+    def dependency_label(kind: str) -> str:
+        return {"required_input": "required input", "planning_input": "planning input", "event_input": "event input", "conditional_input": "conditional input"}.get(kind, kind.replace("_", " "))
+
+    def capability_label(strength: str) -> str:
+        return {
+            "hard_gate": "prerequisite",
+            "partial_gate": "partial prerequisite",
+            "supporting_capability": "supporting capability",
+        }.get(strength, strength.replace("_", " "))
+
+    def flow_consumer(use: Dict[str, Any]) -> str:
+        outcome_id = str(use.get("subcategory_id") or "")
+        content = (
+            f'<strong>{esc(flow_label(outcome_id))}</strong>'
+            f'<span>{esc(dependency_label(str(use.get("dependency_kind") or "")))}</span>'
+            f'<p>{esc(str(use.get("reason") or ""))}</p>'
+        )
+        return flow_outcome_element("csf-flow-consumer csf-flow-outcome", outcome_id, content)
+
+    def flow_source(source: Dict[str, Any]) -> str:
+        outcome_id = str(source.get("subcategory_id") or "")
+        content = f'<strong>{esc(flow_label(outcome_id))}</strong><p>{esc(str(source.get("guidance") or ""))}</p>'
+        return flow_outcome_element("csf-flow-consumer csf-flow-outcome", outcome_id, content)
+
+    selected_output_node = flow_outcome_element(
+        "csf-flow-node source csf-flow-outcome",
+        subcategory_id,
+        f'<strong>{esc(selected_label)}</strong><span>This outcome</span>',
+    )
+    def selected_input_node(item: Dict[str, Any]) -> str:
+        return flow_outcome_element(
+            "csf-flow-node source csf-flow-outcome",
+            subcategory_id,
+            f'<strong>{esc(selected_label)}</strong><span>{esc(dependency_label(str(item.get("dependency_kind") or "")))}</span>',
+        )
     output_graphs = "".join(
         f'''<div class="csf-flow-graph">
-  <div class="csf-flow-node source"><strong>{esc(selected_label)}</strong><span>This outcome</span></div>
+  {selected_output_node}
   <div class="csf-flow-arrow"><span>produces</span><b>→</b></div>
   <div class="csf-flow-node information"><strong>{esc(str(item.get("title") or "Information"))}</strong><span>{esc(str(item.get("description") or ""))}</span></div>
   <div class="csf-flow-arrow"><span>used by</span><b>→</b></div>
-  <div class="csf-flow-consumers">{''.join(f'<div class="csf-flow-consumer"><strong>{esc(flow_label(str(use.get("subcategory_id") or "")))}</strong><span>{esc(dependency_label(str(use.get("dependency_kind") or "")))}</span><p>{esc(str(use.get("reason") or ""))}</p></div>' for use in item.get("uses") or []) or '<p class="csf-record-empty">No direct downstream use is defined yet.</p>'}</div>
+  <div class="csf-flow-consumers">{''.join(flow_consumer(use) for use in item.get("uses") or []) or '<p class="csf-record-empty">No direct downstream use is defined yet.</p>'}</div>
 </div>'''
         for item in flow_outputs
     )
     input_graphs = "".join(
         f'''<div class="csf-flow-graph input">
-  <div class="csf-flow-consumers">{''.join(f'<div class="csf-flow-consumer"><strong>{esc(flow_label(str(source.get("subcategory_id") or "")))}</strong><p>{esc(str(source.get("guidance") or ""))}</p></div>' for source in item.get("sources") or []) or '<p class="csf-record-empty">A source outcome has not been defined yet.</p>'}</div>
+  <div class="csf-flow-consumers">{''.join(flow_source(source) for source in item.get("sources") or []) or '<p class="csf-record-empty">A source outcome has not been defined yet.</p>'}</div>
   <div class="csf-flow-arrow"><span>produces</span><b>→</b></div>
   <div class="csf-flow-node information"><strong>{esc(str(item.get("title") or "Information"))}</strong><span>{esc(str(item.get("description") or ""))}</span></div>
   <div class="csf-flow-arrow"><span>used here</span><b>→</b></div>
-  <div class="csf-flow-node source"><strong>{esc(selected_label)}</strong><span>{esc(dependency_label(str(item.get("dependency_kind") or "")))}</span></div>
+  {selected_input_node(item)}
 </div>'''
         for item in flow_inputs
     )
+    def capability_node(outcome_id: str) -> str:
+        return flow_outcome_element(
+            "csf-flow-node source csf-flow-outcome",
+            outcome_id,
+            f'<strong>{esc(flow_label(outcome_id))}</strong><span>CSF outcome</span>',
+            "capabilities",
+        )
+
+    capability_prerequisite_graphs = "".join(
+        f'''<article class="csf-capability-graph">
+  {capability_node(str(item.get("prerequisite_subcategory_id") or ""))}
+  <div class="csf-flow-arrow"><span>supports</span><b>→</b></div>
+  {capability_node(subcategory_id)}
+  <p><strong>{esc(capability_label(str(item.get("dependency_strength") or "")))}</strong>{esc(str(item.get("rationale") or ""))}</p>
+</article>'''
+        for item in capability_prerequisites
+    )
+    capability_dependent_graphs = "".join(
+        f'''<article class="csf-capability-graph">
+  {capability_node(subcategory_id)}
+  <div class="csf-flow-arrow"><span>supports</span><b>→</b></div>
+  {capability_node(str(item.get("dependent_subcategory_id") or ""))}
+  <p><strong>{esc(capability_label(str(item.get("dependency_strength") or "")))}</strong>{esc(str(item.get("rationale") or ""))}</p>
+</article>'''
+        for item in capability_dependents
+    )
+    if capability_prerequisite_graphs or capability_dependent_graphs:
+        capability_context_markup = f'''<template id="csf-capability-template"><div class="modal-backdrop"><section class="modal-dialog csf-information-flow-dialog" role="dialog" aria-modal="true" aria-labelledby="csf-capability-title"><header class="modal-head"><div><div class="kicker">Product-authored learning aid</div><h2 id="csf-capability-title">Capabilities</h2><p class="csf-modal-outcome">{esc(selected_label)}</p></div><button class="btn" type="button" data-modal-close>Close</button></header><div class="modal-body csf-information-flow-body">{f'<section><h3>Capabilities that support this outcome</h3>{capability_prerequisite_graphs}</section>' if capability_prerequisite_graphs else ''}{f'<section><h3>Outcomes this capability supports</h3>{capability_dependent_graphs}</section>' if capability_dependent_graphs else ''}</div></section></div></template>'''
+    else:
+        capability_context_markup = ""
+    capability_button = '<button class="csf-information-flow-button" type="button" data-capability-modal aria-haspopup="dialog">Capabilities</button>' if capability_context_markup else ''
     if flow_outputs or flow_inputs:
         if flow_outputs:
             first_output = flow_outputs[0]
@@ -3530,10 +3792,11 @@ def render_csf_assessment_prototype(
             flow_buttons = '<button class="csf-information-flow-button" type="button" data-information-flow-modal data-information-flow-direction="downstream" aria-haspopup="dialog">Information flow</button>'
         else:
             flow_buttons = '<button class="csf-information-flow-button" type="button" data-information-flow-modal data-information-flow-direction="upstream" aria-haspopup="dialog">Information flow</button>'
-        flow_context = f'''<div class="csf-why-matters"><div><div class="kicker">Why this matters</div><p>{esc(why_text)}</p></div><div class="csf-information-flow-buttons">{flow_buttons}</div></div>
-<template id="csf-information-flow-template"><div class="modal-backdrop"><section class="modal-dialog csf-information-flow-dialog" role="dialog" aria-modal="true" aria-labelledby="csf-information-flow-title"><header class="modal-head"><div><div class="kicker">Why this outcome is necessary</div><h2 id="csf-information-flow-title">Information flow</h2><p class="csf-modal-outcome">{esc(selected_label)}</p></div><button class="btn" type="button" data-modal-close>Close</button></header><div class="modal-body csf-information-flow-body">{f'<section data-information-flow-section="downstream"><h3>Information this outcome provides</h3>{output_graphs}</section>' if output_graphs else ''}{f'<section data-information-flow-section="upstream"><h3>Information this outcome needs</h3>{input_graphs}</section>' if input_graphs else ''}</div></section></div></template>'''
+        flow_context = f'''<div class="csf-why-matters"><div><div class="kicker">Why this matters</div><p>{esc(why_text)}</p></div><div class="csf-information-flow-buttons">{flow_buttons}{capability_button}</div></div>
+<template id="csf-information-flow-template"><div class="modal-backdrop"><section class="modal-dialog csf-information-flow-dialog" role="dialog" aria-modal="true" aria-labelledby="csf-information-flow-title"><header class="modal-head"><div><div class="kicker">Why this outcome is necessary</div><h2 id="csf-information-flow-title">Information flow</h2><p class="csf-modal-outcome">{esc(selected_label)}</p></div><button class="btn" type="button" data-modal-close>Close</button></header><div class="modal-body csf-information-flow-body">{f'<section data-information-flow-section="upstream"><h3>Information this outcome needs</h3>{input_graphs}</section>' if input_graphs else ''}{f'<section data-information-flow-section="downstream"><h3>Information this outcome provides</h3>{output_graphs}</section>' if output_graphs else ''}</div></section></div></template>'''
     else:
-        flow_context = ""
+        flow_context = f'<div class="csf-information-flow-buttons">{capability_button}</div>' if capability_button else ""
+    flow_context += capability_context_markup
     return f'''<div class="csf-assessment-prototype">
   <div class="csf-assessment-context"><p class="mini">{esc(plain_text or guidance or "Product explanation is not available for this outcome.")}</p>{example_content}{flow_context}</div>
   {body}<div class="csf-assessment-comparison">{actions}{supporting_basis}</div>
@@ -3651,6 +3914,7 @@ def render_csf_explorer(
                 str(((model or {}).get("csf_outcome_records") or {}).get("read_error") or ""),
                 int(((model or {}).get("csf_outcome_records") or {}).get("reviewed_action_total") or 0),
                 dict((model or {}).get("csf_information_flow") or {}),
+                dict((model or {}).get("csf_capability_context") or {}),
                 str(active_profile.get("profile_kind") or "organizational") == "organizational",
             )
 
@@ -3685,7 +3949,18 @@ def render_csf_guidance(current_path: str) -> str:
     )
 
 
-def render_page_shell(model: Dict[str, Any], current_path: str, title: str, lede: str, body_html: str, *, show_technical_nav: bool = False) -> str:
+def render_tile_return_header(heading_html: str, return_href: str, return_label: str) -> str:
+    """Use one consistent in-tile heading and return-control treatment on secondary pages."""
+    return (
+        f'<div class="profile-page-head"><div>{heading_html}</div>'
+        f'<a class="btn" href="{esc(return_href)}">{esc(return_label)}</a></div>'
+    )
+
+
+def render_page_shell(
+    model: Dict[str, Any], current_path: str, title: str, lede: str, body_html: str, *,
+    show_technical_nav: bool = False, return_href: str = "", return_label: str = "",
+) -> str:
     persona_id = CSF_ANALYST_PERSONA_ID
     persona_profile = coerce_persona_profile((model.get("app") or {}).get("persona_profile") or {"persona_id": persona_id})
     mood = dashboard_mood(model)
@@ -3714,9 +3989,34 @@ def render_page_shell(model: Dict[str, Any], current_path: str, title: str, lede
         "/audit-log",
         "/community-profiles",
     }
-    is_configuration_page = current_path in configuration_routes
+    is_configuration_page = current_path in configuration_routes or current_path == "/plans"
     mode_link_href = "/govern" if is_configuration_page else "/"
     mode_link_label = "Workspace" if is_configuration_page else "Configure"
+    tile_return_defaults = {
+        "/plans": ("/", "Back to Configure"),
+        "/control-catalogs": ("/", "Back to Configure"),
+        "/evidence": ("/", "Back to Configure"),
+        "/audit-log": ("/", "Back to Configure"),
+        "/community-profiles": ("/", "Back to Configure"),
+        "/profile-creation": ("/", "Back to Configure"),
+    }
+    tile_return_href, tile_return_label = (
+        (return_href, return_label)
+        if return_href and return_label
+        else tile_return_defaults.get(current_path, ("", ""))
+    )
+    if tile_return_href and tile_return_label:
+        heading_match = re.search(
+            r'(<section class="panel stack">\s*)(<div class="kicker">.*?</div>\s*<h2>.*?</h2>)',
+            body_html,
+            flags=re.DOTALL,
+        )
+        if heading_match:
+            heading = heading_match.group(2)
+            replacement = heading_match.group(1) + render_tile_return_header(
+                heading, tile_return_href, tile_return_label,
+            )
+            body_html = body_html[:heading_match.start()] + replacement + body_html[heading_match.end():]
     is_csf_explorer_route = current_path in CSF_FUNCTION_ID_BY_ROUTE
     workspace_html = (
         render_csf_explorer(current_path, model.get("csf_explorer_selection"), model)
@@ -3728,7 +4028,7 @@ def render_page_shell(model: Dict[str, Any], current_path: str, title: str, lede
 <!-- csf-app:start -->
 <div id="csf-app" data-csf-route="{esc(current_path)}" data-csf-guidance-purpose="{esc(guidance_purpose)}" data-csf-guidance-use="{esc(guidance_use)}">
 <section class="panel csf-map">
-  <header class="app-masthead"><div class="app-title-context"><div class="app-title">Codex Monitor</div>{profile_selector}</div><div class="app-header-actions"><a class="app-home-link" href="{mode_link_href}">{mode_link_label}</a></div></header>
+  <header class="app-masthead"><div class="app-title-context"><div class="app-title">Codex Monitor</div>{profile_selector}</div><div class="app-header-actions"><button class="app-theme-toggle" type="button" data-theme-toggle aria-pressed="false">Dark mode</button><a class="app-home-link" href="{mode_link_href}">{mode_link_label}</a></div></header>
   <div class="kicker">CSF action map</div>
   <nav class="csf-action-bar" aria-label="NIST Cybersecurity Framework actions">{render_primary_nav(current_path, persona_profile=persona_profile, show_technical=show_technical_nav)}</nav>
   {render_csf_guidance(current_path)}
@@ -3788,6 +4088,7 @@ def render_csf_entry_modal(
     enabled_control_catalog_count: int = 0,
     sample_opportunity: Optional[Dict[str, str]] = None,
     evidence_link_events: Optional[List[Dict[str, Any]]] = None,
+    plans: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Render a compact Tile 3 entry form, detail view, or action-update form."""
     is_action = kind == "action"
@@ -3809,6 +4110,7 @@ def render_csf_entry_modal(
     generic_action_examples = generic_action_examples or {}
     available_evidence = available_evidence or []
     evidence_link_events = evidence_link_events or []
+    plans = plans or []
     query = urllib.parse.urlencode({
         "csf_category": category_id,
         "csf_subcategory": subcategory_id,
@@ -3819,6 +4121,9 @@ def render_csf_entry_modal(
         if is_action:
             fields.extend([
                 ("Mapped control", f"NIST SP 800-53: {linked_control_id} - {linked_control_title}" if linked_control_id else "Manual action — no mapped control selected"),
+                ("Plan", record.get("plan_name") or "Unplanned"),
+                ("Priority", str(record.get("action_priority") or "normal").replace("_", " ").title()),
+                ("Priority rationale", record.get("priority_rationale")),
                 ("Evidence", "; ".join(str(value) for value in (record.get("basis_titles") or [])) or "No evidence linked directly to this action."),
                 ("Why this action?", record.get("rationale")),
                 ("Status", str(record.get("action_status") or "").replace("_", " ").title()),
@@ -3873,6 +4178,8 @@ def render_csf_entry_modal(
     if is_action:
         status = str((record or {}).get("action_status") or "planned")
         action_id = str((record or {}).get("action_id") or "")
+        selected_plan_id = str((record or {}).get("plan_id") or "")
+        selected_priority = str((record or {}).get("action_priority") or "normal")
         status_buttons = "".join(
             f'<label class="csf-status-choice"><input type="radio" name="action_status" value="{value}"{" checked" if status == value else ""}>{label}</label>'
             for value, label in (("planned", "Planned"), ("in_progress", "In progress"), ("completed", "Completed"), ("not_proceeding", "Not proceeding"))
@@ -3912,17 +4219,26 @@ def render_csf_entry_modal(
             direct_evidence_ids = set(str(value) for value in (record.get("basis_ids") or []))
             update_evidence_rows = "".join(
                 f'''<label class="csf-control-choice"><input type="checkbox" name="basis_id" value="{esc(str(item.get("basis_id") or ""))}{'" checked' if str(item.get("basis_id") or "") in direct_evidence_ids else '"'}>
-<div class="csf-control-content"><strong>{esc(str(item.get("title") or "Untitled evidence"))}</strong><span class="csf-control-title">{esc(str(item.get("basis_type") or "").replace("_", " ").title())}</span></div></label>'''
+<div class="csf-control-content"><strong>{esc(str(item.get("title") or "Untitled evidence"))}</strong><span class="csf-control-title">{esc(str(item.get("basis_type") or "").replace("_", " ").title())}</span><p class="csf-control-interpretation">Recorded {esc(str(item.get("recorded_on") or "date not recorded"))} Â· Review {esc(str(item.get("review_on") or "date not set"))}</p></div></label>'''
                 for item in available_evidence
             )
-            update_evidence_picker = f'''<fieldset class="csf-control-picker"><legend>Evidence supporting this action <span>(optional)</span></legend><p class="mini">Select evidence that supports this action and the update you are recording now.</p><div class="csf-control-list" tabindex="0" aria-label="Evidence supporting this action">{update_evidence_rows}</div></fieldset>'''
+            update_evidence_picker = f'''<fieldset class="csf-control-picker"><legend>Evidence supporting this action <span>(optional)</span></legend><p class="mini">Select evidence that supports this action and the update you are recording now.</p><div class="csf-control-list csf-action-evidence-list" tabindex="0" aria-label="Evidence supporting this action">{update_evidence_rows}</div></fieldset>'''
+        plan_options = '<option value="">Unplanned</option>' + "".join(
+            f'<option value="{esc(str(item.get("plan_id") or ""))}"{(" selected" if str(item.get("plan_id") or "") == selected_plan_id else "")}>{esc(str(item.get("plan_name") or "Untitled plan"))} — {esc(str(item.get("plan_status") or "draft").replace("_", " ").title())}</option>'
+            for item in plans
+        )
+        priority_options = "".join(
+            f'<option value="{value}"{(" selected" if selected_priority == value else "")}>{label}</option>'
+            for value, label in (("critical", "Critical"), ("high", "High"), ("normal", "Normal"), ("low", "Low"))
+        )
         fields = f'''<input type="hidden" name="action_id" value="{esc(action_id)}">
 {control_picker}
 {evidence_picker}
 {(f'<div class="csf-linked-control"><strong>Mapped control</strong><span>NIST SP 800-53: {esc(linked_control_id)} - {esc(linked_control_title or "Title unavailable")}</span></div>' if linked_control_id else ('<div class="csf-linked-control manual"><strong>Action origin</strong><span>Manual action — no mapped NIST SP 800-53 control selected.</span></div>' if record else ''))}
 <label>Action title<input name="title" required maxlength="240" value="{esc((record or {}).get("title") or "")}" placeholder="Example: {esc(generic_action_examples.get("title") or "Enable BitLocker on the laptop")}"></label>
 <label>Action details<textarea name="details" placeholder="Example: {esc(generic_action_examples.get("details") or "Describe what will be done and how.")}">{esc((record or {}).get("details") or "")}</textarea></label>
-<label>Why this action?<textarea name="rationale" placeholder="Example: {esc(generic_action_examples.get("rationale") or "Explain why this supports the CSF outcome.")}">{esc((record or {}).get("rationale") or "")}</textarea></label>
+<label>Why this action?<textarea class="csf-edit-action-compact-text" name="rationale" placeholder="Example: {esc(generic_action_examples.get("rationale") or "Explain why this supports the CSF outcome.")}">{esc((record or {}).get("rationale") or "")}</textarea></label>
+<fieldset class="csf-control-picker csf-action-planning"><legend>Planning <span>(optional)</span></legend><div class="csf-action-planning-row"><label>Plan<select name="plan_id">{plan_options}</select></label><label>Priority<select name="action_priority">{priority_options}</select></label></div><label>Priority rationale<textarea class="csf-edit-action-compact-text" name="priority_rationale" placeholder="Why does this action need this priority?">{esc((record or {}).get("priority_rationale") or "")}</textarea></label></fieldset>
 <fieldset class="csf-status-options"><legend>Status</legend>{status_buttons}</fieldset>
 <label>Progress note<textarea name="progress_note" placeholder="What changed since the last update? Example: Recovery key verified and stored in the approved location."></textarea></label>
 {update_evidence_picker}'''
@@ -4031,23 +4347,34 @@ def render_dashboard(config: AppConfig, snapshot: Dict[str, Any], message: str =
     body = f"""
 <section class="dashboard-start-tiles">
   <div class="panel stack">
-    <div class="kicker">Current profile</div>
-    <div class="csf-community-profile-list">{profile_source_summary}</div>
-    {profile_controls_summary}
-    <div class="task-actions">
-      <a class="btn primary" href="{esc(active_profile_url)}">Edit current profile</a>
-      <a class="btn primary" href="/profile-creation">Add new profile</a>
-      <button class="btn" type="button" disabled title="Plans will be added as a separate configuration screen.">Plans</button>
+    <div class="csf-current-profile-layout">
+      <div class="csf-current-profile-details">
+        <div class="kicker">Current profile</div>
+        <h2>{esc(active_profile_name or "No profile selected")}</h2>
+        {f'<div class="mini"><strong>Context:</strong> {esc(str(active_profile.get("context_summary") or "No context is recorded."))}</div>'}
+        <div class="csf-community-profile-list">{profile_source_summary}</div>
+        {profile_controls_summary}
+      </div>
+      <div class="task-actions csf-current-profile-actions">
+        <a class="btn primary" href="{esc(active_profile_url)}">Edit current profile</a>
+        <a class="btn primary" href="/profile-creation">Add new profile</a>
+      </div>
     </div>
   </div>
   <div class="panel stack">
     <div class="kicker">Catalogs</div>
-    <div class="csf-record-list-head"><strong>Community Profiles</strong></div>
-    <div class="mini">Browse frozen Community Profile sources that can inform an Organizational Profile.</div>
-    <div class="task-actions"><a class="btn primary" href="/community-profiles">Profiles catalogs</a></div>
-    <div class="csf-record-list-head"><strong>Control catalogs</strong></div>
-    <div class="mini">Browse the control frameworks available for a Profile to select.</div>
-    <div class="task-actions"><a class="btn primary" href="/control-catalogs">Control catalogs</a></div>
+    <div class="csf-catalog-columns">
+      <div class="csf-catalog-column">
+        <div class="csf-record-list-head"><strong>Community profiles</strong></div>
+        <div class="mini">Browse frozen, published Profile sources that can inform an Organizational Profile.</div>
+        <div class="task-actions"><a class="btn" href="/community-profiles">Browse community profiles</a></div>
+      </div>
+      <div class="csf-catalog-column">
+        <div class="csf-record-list-head"><strong>Control catalogs</strong></div>
+        <div class="mini">Browse control frameworks available for selection by a Profile.</div>
+        <div class="task-actions"><a class="btn" href="/control-catalogs">Control catalogs</a></div>
+      </div>
+    </div>
   </div>
   {render_configuration_records_tile(config, model, top_report)}
 </section>
@@ -4055,13 +4382,152 @@ def render_dashboard(config: AppConfig, snapshot: Dict[str, Any], message: str =
     return render_page_shell(model, "/", "CSF Analyst", "Choose how this workspace is configured, automated, and documented.", body, show_technical_nav=persona_allows_diagnostics(config.ui_persona))
 
 
+def render_plans_page(config: AppConfig, snapshot: Dict[str, Any], message: str = "") -> str:
+    """Render the lightweight Profile-scoped planning workspace."""
+    connection = ioc_store.connect_db(config.state_db_path)
+    try:
+        ioc_store.init_db(connection)
+        profile = ioc_store.get_active_csf_profile(connection)
+        profile_id = str(profile.get("profile_id") or "")
+        plans = ioc_store.list_csf_plans(connection, profile_id, include_archived=True)
+        unplanned_actions = ioc_store.list_csf_profile_actions(connection, profile_id, plan_id="")
+        plan_events = ioc_store.list_csf_plan_audit_events(connection, profile_id, limit=50)
+    finally:
+        connection.close()
+    editable = str(profile.get("profile_kind") or "") == "organizational"
+    plan_rows = "".join(
+        f'''<a class="csf-record-row" data-record-modal href="/csf-plan?plan_id={urllib.parse.quote(str(plan.get("plan_id") or ""), safe="")}"><strong>{esc(str(plan.get("plan_name") or "Untitled plan"))}</strong>
+<span>{esc(str(plan.get("plan_status") or "draft").replace("_", " ").title())} · {esc(str(plan.get("plan_priority") or "normal").title())} priority · {esc(str(plan.get("action_count") or 0))} action(s){(" · Owner: " + esc(str(plan.get("owner_name") or ""))) if plan.get("owner_name") else ""}{(" · Target: " + esc(str(plan.get("target_on") or ""))) if plan.get("target_on") else ""}</span>
+{("<span>" + esc(str(plan.get("purpose") or "")) + "</span>") if plan.get("purpose") else "<span>No purpose recorded.</span>"}</a>'''
+        for plan in plans
+    ) or '<p class="csf-record-empty">No named Plans are recorded. New actions can remain Unplanned until work is deliberately grouped.</p>'
+    assignable_plans = [plan for plan in plans if str(plan.get("plan_status") or "") != "archived"]
+    assignment_options = "".join(
+        f'<option value="{esc(str(plan.get("plan_id") or ""))}">{esc(str(plan.get("plan_name") or "Untitled plan"))}</option>'
+        for plan in assignable_plans
+    )
+    if editable and assignment_options:
+        unplanned_rows = "".join(
+            f'''<form class="csf-record-row" method="post" action="/assign-csf-action-plan"><input type="hidden" name="action_id" value="{esc(str(action.get("action_id") or ""))}"><strong>{esc(str(action.get("title") or "Untitled action"))}</strong><span>{esc(str(action.get("subcategory_id") or ""))} · {esc(str(action.get("action_priority") or "normal").title())} priority · {esc(str(action.get("action_status") or "").replace("_", " ").title())}</span><div class="csf-plan-assignment"><label>Assign to Plan <select name="plan_id">{assignment_options}</select></label><button class="btn" type="submit">Assign</button></div></form>'''
+            for action in unplanned_actions
+        ) or '<p class="csf-record-empty">All recorded actions are assigned to a named Plan.</p>'
+    elif editable:
+        unplanned_rows = "".join(
+            f'<div class="csf-record-row"><strong>{esc(str(action.get("title") or "Untitled action"))}</strong><span>{esc(str(action.get("subcategory_id") or ""))} · Create a non-archived Plan before assigning this action.</span></div>'
+            for action in unplanned_actions
+        ) or '<p class="csf-record-empty">All recorded actions are assigned to a named Plan.</p>'
+    else:
+        unplanned_rows = "".join(
+            f'<div class="csf-record-row"><strong>{esc(str(action.get("title") or "Untitled action"))}</strong><span>{esc(str(action.get("subcategory_id") or ""))} · {esc(str(action.get("action_priority") or "normal").title())} priority · {esc(str(action.get("action_status") or "").replace("_", " ").title())}</span></div>'
+            for action in unplanned_actions
+        ) or '<p class="csf-record-empty">All recorded actions are assigned to a named Plan.</p>'
+    event_rows = "".join(
+        f'<div class="csf-record-row"><strong>{esc(str(event.get("event_type") or "").replace("_", " ").title())}: {esc(str(event.get("action_title") or event.get("plan_name") or "Plan record"))}</strong><span>{esc(pretty_time(event.get("recorded_at")))}</span><span>{esc(str(event.get("rationale") or "No rationale recorded."))}</span></div>'
+        for event in plan_events
+    ) or '<p class="csf-record-empty">No planning events are recorded yet.</p>'
+    create_form = "" if not editable else '<div class="task-actions"><a class="btn primary" data-record-modal href="/csf-plan?new=1">New Plan</a></div>'
+    body = f'''<section class="panel stack"><div class="kicker">Planning</div><h2>Plans for {esc(str(profile.get("profile_name") or "this Profile"))}</h2>
+<div class="mini">A Plan groups deliberate work within this Organizational Profile. An action can belong to one Plan or remain in the virtual <strong>Unplanned</strong> bucket. Plans do not own evidence; evidence remains reusable across the Profile.</div>
+{('<div class="mini">Frozen base and Community Profiles are read-only. Create or select an Organizational Profile to plan work.</div>' if not editable else create_form)}
+<div class="csf-record-list-head"><strong>Named Plans</strong><span class="mini">Open a Plan to review its actions or update its status.</span></div><div class="csf-record-list csf-plan-summary-list" tabindex="0" aria-label="Named Plans">{plan_rows}</div>
+<div class="csf-record-list-head"><strong>Unplanned actions</strong></div><div class="csf-record-list csf-plan-unplanned-list" tabindex="0" aria-label="Unplanned actions">{unplanned_rows}</div>
+<div class="csf-record-list-head"><strong>Planning history</strong></div><div class="csf-record-list csf-plan-history-list" tabindex="0" aria-label="Planning history">{event_rows}</div>
+</section>'''
+    model = build_dashboard_model(config, snapshot, message)
+    return render_page_shell(model, "/plans", "Plans", "Group and prioritize work without turning the workspace into a full project-management system.", body, show_technical_nav=persona_allows_diagnostics(config.ui_persona))
+
+
+def render_csf_plan_modal(
+    profile: Dict[str, Any], plan: Optional[Dict[str, Any]], actions: List[Dict[str, Any]],
+    events: List[Dict[str, Any]], unplanned_actions: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Render focused create/edit Plan UI, including its attributed actions."""
+    is_new = plan is None
+    current = plan or {}
+    action_url = "/create-csf-plan" if is_new else "/update-csf-plan"
+    heading = "New Plan" if is_new else str(current.get("plan_name") or "Plan")
+    status = str(current.get("plan_status") or "draft")
+    priority = str(current.get("plan_priority") or "normal")
+    status_options = "".join(
+        f'<option value="{value}"{" selected" if status == value else ""}>{label}</option>'
+        for value, label in (("draft", "Draft"), ("active", "Active"), ("on_hold", "On hold"), ("completed", "Completed"))
+    )
+    priority_options = "".join(
+        f'<option value="{value}"{" selected" if priority == value else ""}>{label}</option>'
+        for value, label in (("critical", "Critical"), ("high", "High"), ("normal", "Normal"), ("low", "Low"))
+    )
+    fields = f'''<input type="hidden" name="plan_id" value="{esc(str(current.get("plan_id") or ""))}"><label class="csf-plan-name">Plan name<input name="plan_name" required maxlength="240" value="{esc(str(current.get("plan_name") or ""))}" placeholder="Example: Protect customer information"></label><label class="csf-plan-purpose">Purpose<textarea name="purpose" placeholder="What outcome gaps or work does this Plan coordinate?">{esc(str(current.get("purpose") or ""))}</textarea></label><label>Status<select name="plan_status">{status_options}</select></label><label>Priority<select name="plan_priority">{priority_options}</select></label><label><span>Owner <span class="mini">(optional)</span></span><input name="owner_name" maxlength="240" value="{esc(str(current.get("owner_name") or ""))}" placeholder="Person accountable for coordinating this Plan"></label><label><span>Start date <span class="mini">(optional)</span></span><input name="start_on" type="date" value="{esc(str(current.get("start_on") or ""))}"></label><label><span>Target date <span class="mini">(optional)</span></span><input name="target_on" type="date" value="{esc(str(current.get("target_on") or ""))}"></label><label class="csf-plan-rationale"><span>Reason for change <span class="mini">(optional)</span></span><textarea name="rationale" placeholder="Why is this Plan being created or changed?">{esc(str(current.get("rationale") or ""))}</textarea></label>'''
+    def action_row(action: Dict[str, Any]) -> str:
+        subcategory_id = str(action.get("subcategory_id") or "").strip().upper()
+        official_subcategory = csf_catalog.find_official_subcategory(subcategory_id) or {}
+        category_id = str(official_subcategory.get("category_id") or "")
+        action_id = str(action.get("action_id") or "")
+        if category_id and action_id:
+            href = "/csf-reviewed-action?" + urllib.parse.urlencode({
+                "csf_category": category_id,
+                "csf_subcategory": subcategory_id,
+                "return_to": "/plans",
+                "action_id": action_id,
+            })
+            return f'''<div class="csf-record-row csf-plan-assigned-action"><a data-record-modal href="{esc(href)}"><strong>{esc(str(action.get("title") or "Untitled action"))}</strong><span>{esc(subcategory_id)} · {esc(str(action.get("action_status") or "").replace("_", " ").title())} · {esc(str(action.get("action_priority") or "normal").title())} priority</span></a><form method="post" action="/unassign-csf-action-plan"><input type="hidden" name="action_id" value="{esc(action_id)}"><input type="hidden" name="plan_id" value="{esc(str(current.get("plan_id") or ""))}"><button class="btn" type="submit">Unlink</button></form></div>'''
+        return f'<div class="csf-record-row"><strong>{esc(str(action.get("title") or "Untitled action"))}</strong><span>{esc(subcategory_id)} · {esc(str(action.get("action_status") or "").replace("_", " ").title())} · {esc(str(action.get("action_priority") or "normal").title())} priority</span></div>'
+
+    action_rows = "".join(action_row(action) for action in actions) or '<p class="csf-record-empty">No actions are assigned to this Plan yet.</p>'
+    can_assign_actions = str(profile.get("profile_kind") or "") == "organizational"
+
+    def unplanned_action_row(action: Dict[str, Any]) -> str:
+        subcategory_id = str(action.get("subcategory_id") or "").strip().upper()
+        official_subcategory = csf_catalog.find_official_subcategory(subcategory_id) or {}
+        category_id = str(official_subcategory.get("category_id") or "")
+        action_id = str(action.get("action_id") or "")
+        summary = f'''<strong>{esc(str(action.get("title") or "Untitled action"))}</strong><span>{esc(subcategory_id)} · {esc(str(action.get("action_priority") or "normal").title())} priority · {esc(str(action.get("action_status") or "").replace("_", " ").title())}</span>'''
+        if category_id and action_id:
+            href = "/csf-reviewed-action?" + urllib.parse.urlencode({
+                "csf_category": category_id,
+                "csf_subcategory": subcategory_id,
+                "return_to": "/plans",
+                "action_id": action_id,
+            })
+            summary = f'<a data-record-modal href="{esc(href)}">{summary}</a>'
+        return f'''<div class="csf-record-row csf-plan-assigned-action">{summary}<form method="post" action="/assign-csf-action-plan"><input type="hidden" name="action_id" value="{esc(action_id)}"><input type="hidden" name="plan_id" value="{esc(str(current.get("plan_id") or ""))}"><button class="btn" type="submit">Assign</button></form></div>'''
+
+    unplanned_rows = "".join(unplanned_action_row(action) for action in (unplanned_actions or [])) or '<p class="csf-record-empty">No unplanned actions are available.</p>'
+    def plan_event_row(event: Dict[str, Any]) -> str:
+        event_type = str(event.get("event_type") or "").replace("_", " ").title()
+        action_title = str(event.get("action_title") or "").strip()
+        field_label = {
+            "plan_id": "Plan assignment",
+            "plan_status": "Plan status",
+            "plan_priority": "Plan priority",
+            "plan_name": "Plan name",
+        }.get(str(event.get("field_name") or ""), str(event.get("field_name") or event_type).replace("_", " ").title())
+        heading = f"{event_type}: {action_title}" if action_title else field_label
+        return f'<div class="csf-record-row"><strong>{esc(heading)}</strong><span>{esc(pretty_time(event.get("recorded_at")))} · {esc(str(event.get("rationale") or "No rationale recorded."))}</span></div>'
+
+    event_rows = "".join(plan_event_row(event) for event in events) or '<p class="csf-record-empty">No Plan history is recorded yet.</p>'
+    unplanned_picker = "" if (is_new or not can_assign_actions) else f'''<div class="csf-record-list-head"><strong>Unplanned actions</strong></div><div class="csf-record-list csf-plan-unplanned-list" tabindex="0" aria-label="Unplanned actions">{unplanned_rows}</div>'''
+    supporting = "" if is_new else f'''<div class="csf-record-list-head"><strong>Assigned actions</strong></div><div class="csf-record-list csf-plan-assigned-list" tabindex="0" aria-label="Assigned actions">{action_rows}</div>{unplanned_picker}<div class="csf-record-list-head"><strong>Plan history</strong></div><div class="csf-record-list" tabindex="0" aria-label="Plan history">{event_rows}</div>'''
+    save_label = "Create Plan" if is_new else "Save Plan changes"
+    return f'''<div class="modal-backdrop" data-modal-close><section class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="plan-modal-title"><div class="modal-head"><div><div class="kicker">Planning · {esc(str(profile.get("profile_name") or ""))}</div><h2 id="plan-modal-title">{esc(heading)}</h2></div><button class="btn" type="button" data-modal-close>Close</button></div><div class="modal-body"><form id="csf-plan-form" class="csf-entry-form csf-plan-form" method="post" action="{action_url}">{fields}</form>{supporting}<div class="task-actions"><button class="btn primary" type="submit" form="csf-plan-form">{save_label}</button></div></div></section></div>'''
+
+
 def render_configuration_records_tile(config: AppConfig, model: Dict[str, Any], top_report: Optional[Dict[str, Any]]) -> str:
     """Keep the analyst configuration page free of monitoring operations."""
     if config.app_mode == "analyst":
         return '''<div class="panel stack">
-    <div class="kicker">Records</div>
-    <div class="mini">Review the evidence and append-only audit history that support this Profile.</div>
-    <div class="task-actions"><a class="btn" href="/evidence">Evidence library</a><a class="btn" href="/audit-log">View audit log</a></div>
+    <div class="kicker">Planning &amp; reports</div>
+    <div class="csf-catalog-columns">
+      <div class="csf-catalog-column">
+        <div class="csf-record-list-head"><strong>Plans</strong></div>
+        <div class="mini">Group actions, priorities, owners, and target dates for this Profile.</div>
+        <div class="task-actions"><a class="btn primary" href="/plans">Open plans</a></div>
+      </div>
+      <div class="csf-catalog-column">
+        <div class="csf-record-list-head"><strong>Records</strong></div>
+        <div class="mini">Review the evidence and append-only audit history that support this Profile. These records provide the basis for profile, gap, plan, and evidence-review reports.</div>
+        <div class="task-actions"><a class="btn" href="/evidence">Evidence library</a><a class="btn" href="/audit-log">View audit log</a></div>
+      </div>
+    </div>
   </div>'''
     attention = int((model.get("task_job_health") or {}).get("attention_tasks") or 0)
     return f'''<div class="panel stack">
@@ -4111,7 +4577,7 @@ def render_control_catalogs_page(config: AppConfig, snapshot: Dict[str, Any], me
   <div class="mini">Select the control catalogs available in the Tile 3 action picker for <strong>{esc(str(active_profile.get('profile_name') or 'this Profile'))}</strong>. Clearing a selection does not remove imported controls, mappings, or actions already linked to them.</div>
   <form class="stack" method="post" action="/set-csf-control-catalogs">
     <div class="care-list">{rows}</div>
-    <div class="task-actions">{('<button class="btn primary" type="submit">Save catalog selection</button>' if str(active_profile.get('profile_kind') or '') == 'organizational' else '<span class="mini">Frozen Community and base Profiles are read-only.</span>')}<a class="btn" href="/">Back to workspace</a></div>
+    <div class="task-actions">{('<button class="btn primary" type="submit">Save catalog selection</button>' if str(active_profile.get('profile_kind') or '') == 'organizational' else '<span class="mini">Frozen Community and base Profiles are read-only.</span>')}</div>
   </form>
 </section>'''
     model = build_dashboard_model(config, snapshot, message)
@@ -4138,7 +4604,6 @@ def render_control_catalogs_page(config: AppConfig, snapshot: Dict[str, Any], me
   <div class="kicker">Configuration</div><h2>Control catalogs</h2>
   <div class="mini">These control-framework sources are available for a Profile to select. Choose a Profile's control set when creating or editing that Profile.</div>
   <div class="care-list">{rows}</div>
-  <div class="task-actions"><a class="btn" href="/">Back to workspace</a></div>
 </section>'''
     model = build_dashboard_model(config, snapshot, message)
     return render_page_shell(model, "/control-catalogs", "Control catalogs", "Browse the control-framework sources a Profile may use.", body, show_technical_nav=persona_allows_diagnostics(config.ui_persona))
@@ -4184,17 +4649,20 @@ def render_evidence_library_page(
   <div class="csf-record-list-head"><strong>Used by outcomes</strong></div><div class="csf-record-list">{outcome_rows}</div>
   <div class="csf-record-list-head"><strong>Used by actions</strong></div><div class="csf-record-list">{action_rows}</div>
   <div class="csf-record-list-head"><strong>Used by action updates</strong></div><div class="csf-record-list">{update_rows}</div>
-  <div class="task-actions"><a class="btn" href="/evidence">Back to evidence library</a></div>
 </section>'''
     body = detail_html or f'''<section class="panel stack">
   <div class="kicker">Current profile</div>
   <h2>Evidence library</h2>
   <div class="mini">Each evidence artifact is stored once and can be linked to multiple outcomes, actions, and action updates in this Profile. Each use can carry its own assertion, applicability, and review note.</div>
   <div class="csf-record-list" tabindex="0" aria-label="Evidence library">{rows}</div>
-  <div class="task-actions"><a class="btn" href="/">Back to configuration</a></div>
 </section>'''
     model = build_dashboard_model(config, snapshot, message)
-    return render_page_shell(model, "/evidence", "Evidence library", "Review evidence artifacts and how they are used in the active Profile.", body, show_technical_nav=persona_allows_diagnostics(config.ui_persona))
+    return render_page_shell(
+        model, "/evidence", "Evidence library", "Review evidence artifacts and how they are used in the active Profile.", body,
+        show_technical_nav=persona_allows_diagnostics(config.ui_persona),
+        return_href="/evidence" if detail else "",
+        return_label="Back to Evidence library" if detail else "",
+    )
 
 
 def render_audit_log_page(
@@ -4245,7 +4713,6 @@ def render_audit_log_page(
   <div class="mini">Append-only activity for <strong>{esc(str(active_profile.get("profile_name") or "the active Profile"))}</strong>.</div>
   <form class="csf-profile-selector" method="get" action="/audit-log" style="margin-left:0"><label>Log selection<select name="log" onchange="this.form.submit()">{options}</select></label></form>
   <div class="csf-record-list" style="height:520px" tabindex="0" aria-label="Audit log">{log_rows}</div>
-  <div class="task-actions"><a class="btn" href="/">Back to configuration</a></div>
 </section>'''
     model = build_dashboard_model(config, snapshot, "")
     return render_page_shell(model, "/audit-log", "Audit log", "Review profile activity across assessments, evidence, actions, and tailoring.", body, show_technical_nav=persona_allows_diagnostics(config.ui_persona))
@@ -4291,7 +4758,7 @@ def render_community_profiles_page(config: AppConfig, snapshot: Dict[str, Any], 
   <h2>Community Profiles</h2>
   <div class="mini">This catalog lists Community Profiles that are already imported locally as frozen, read-only source artifacts. A Community Profile can inform an Organizational Target Profile; it is not your organization’s assessment.</div>
   <div class="csf-record-list" style="height:auto;max-height:none">{rows}</div>
-  <div class="task-actions"><a class="btn" href="/">Back to workspace</a><a class="btn" href="{esc(str((profile_context.get('community_profiles') or [{}])[0].get('catalog_source_url') or 'https://www.nist.gov/cyberframework/profiles'))}" target="_blank" rel="noreferrer">Open NIST catalog</a></div>
+  <div class="task-actions"><a class="btn" href="{esc(str((profile_context.get('community_profiles') or [{}])[0].get('catalog_source_url') or 'https://www.nist.gov/cyberframework/profiles'))}" target="_blank" rel="noreferrer">Open NIST catalog</a></div>
 </section>'''
     model = build_dashboard_model(config, snapshot, message)
     return render_page_shell(
@@ -4351,6 +4818,8 @@ def render_profile_editor_page(
     outcomes: List[Dict[str, Any]],
     control_catalogs: Optional[List[Dict[str, Any]]] = None,
     saved_outcome_id: str = "",
+    tier_assessment: Optional[Dict[str, Any]] = None,
+    tier_events: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     profile_kind = str(profile.get("profile_kind") or "organizational")
     editable = profile_kind == "organizational"
@@ -4389,6 +4858,37 @@ def render_profile_editor_page(
     profile_name = str(profile.get("profile_name") or "")
     status_options = [("not_selected", "Not selected"), ("included", "Included"), ("inherited", "Inherited"), ("out_of_scope", "Out of scope")]
     target_options = [("fully_implemented", "Fully implemented"), ("partly_implemented", "Partly implemented"), ("not_implemented", "Not implemented"), ("not_applicable", "Not applicable")]
+    tier_assessment = tier_assessment or {}
+    tier_events = tier_events or []
+    tier_names = {1: "Tier 1 - Partial", 2: "Tier 2 - Risk Informed", 3: "Tier 3 - Repeatable", 4: "Tier 4 - Adaptive"}
+
+    def tier_picker(field_name: str, selected: Any) -> str:
+        try:
+            selected_level = int(selected) if selected is not None else None
+        except (TypeError, ValueError):
+            selected_level = None
+        options = ['<option value="">Not recorded</option>']
+        options.extend(
+            f'<option value="{level}"{" selected" if level == selected_level else ""}>{esc(name)}</option>'
+            for level, name in tier_names.items()
+        )
+        return f'<select name="{field_name}">{"".join(options)}</select>'
+
+    profile_id = str(profile.get("profile_id") or "")
+    tier_history_url = "/profile-tier-audit?" + urllib.parse.urlencode({"profile_id": profile_id, "name": profile_name})
+    tier_guidance_url = "/tier-guidance?" + urllib.parse.urlencode({"return_to": "/profile?name=" + profile_name})
+    if editable:
+        target_tier_control = tier_picker("target_tier_level", tier_assessment.get("target_tier_level"))
+        current_tier_control = tier_picker("current_tier_level", tier_assessment.get("current_tier_level"))
+        target_tier_reason = f'<textarea name="target_tier_rationale" maxlength="4000" placeholder="Why is this the appropriate Tier target for this Profile?">{esc(str(tier_assessment.get("target_rationale") or ""))}</textarea>'
+        current_tier_reason = f'<textarea name="current_tier_rationale" maxlength="4000" placeholder="What observed practices support this current Tier judgment?">{esc(str(tier_assessment.get("current_rationale") or ""))}</textarea>'
+    else:
+        target_tier_control = esc(tier_names.get(tier_assessment.get("target_tier_level"), "Not recorded"))
+        current_tier_control = esc(tier_names.get(tier_assessment.get("current_tier_level"), "Not recorded"))
+        target_tier_reason = esc(str(tier_assessment.get("target_rationale") or "No rationale recorded."))
+        current_tier_reason = esc(str(tier_assessment.get("current_rationale") or "No rationale recorded."))
+    tier_status = "No Tier characterization has been recorded." if not tier_events else f"{len(tier_events)} Tier history event{'s' if len(tier_events) != 1 else ''} recorded."
+    tier_section = f'''<section class="csf-assessment-block"><div class="profile-tailoring-head"><h3>CSF Tiers</h3><div class="task-actions"><a class="btn" href="{esc(tier_guidance_url)}">View Tier guidance</a><a class="btn" href="{esc(tier_history_url)}">View Tier history</a></div></div><div class="mini">Record an analyst judgment about this Profile's risk-governance and management rigor. A Tier is not calculated from controls or outcome assessments.</div><div class="csf-assessment-comparison" style="margin-top:8px"><div class="csf-assessment-block" style="display:grid; gap:7px"><strong>Target Tier</strong>{target_tier_control}<label style="display:grid; gap:4px">Why target this Tier?{target_tier_reason}</label></div><div class="csf-assessment-block" style="display:grid; gap:7px"><strong>Current Tier</strong>{current_tier_control}<label style="display:grid; gap:4px">Why is this the current Tier?{current_tier_reason}</label></div></div><div class="mini" style="margin-top:8px">{esc(tier_status)}</div></section>'''
     events_by_outcome: Dict[str, List[Dict[str, Any]]] = {}
     for event in events:
         event_outcome = str(event.get("outcome_id") or "").strip()
@@ -4406,7 +4906,7 @@ def render_profile_editor_page(
             target_markup = "".join(f'<option value="{value}"{" selected" if value == target else ""}>{label}</option>' for value, label in target_options)
             form_id = f'target-{outcome_id.lower().replace(".", "-")}'
             target_control = f'<form id="{form_id}" method="post" action="/set-csf-profile-outcome-target"><input type="hidden" name="profile_name" value="{esc(profile_name)}"><input type="hidden" name="subcategory_id" value="{esc(outcome_id)}"></form><select form="{form_id}" name="target_assessment_level">{target_markup}</select>'
-            rationale_control = f'<input form="{form_id}" name="rationale" required maxlength="2000" aria-label="Reason for change for {esc(outcome_id)} Target assessment" placeholder="Why target this outcome?">'
+            rationale_control = f'<input form="{form_id}" name="rationale" maxlength="2000" aria-label="Reason for change for {esc(outcome_id)} Target assessment" placeholder="Why target this outcome?">'
             evidence_control = f'<input form="{form_id}" name="supporting_evidence_reference" maxlength="1000" aria-label="Supporting evidence for {esc(outcome_id)} Target assessment" placeholder="Optional record, document, or URL">'
             save_state = " is-saved" if outcome_id == saved_outcome_id else ""
             save_label = "Saved" if save_state else "Save"
@@ -4421,7 +4921,7 @@ def render_profile_editor_page(
         if outcome_type == "subcategory" and outcome_events:
             history_items = "".join(
                 f'<div class="csf-outcome-history-item"><span>{esc(pretty_time(event.get("recorded_at")))} · {esc(str(event.get("recorded_by") or "System"))}</span><strong>{esc(audit_change(event))}</strong><span>{esc(str(event.get("rationale") or ""))}</span><span>{esc(str(event.get("supporting_evidence_reference") or ""))}</span></div>'
-                for event in reversed(outcome_events)
+                for event in outcome_events
             )
             outcome_rows_list.append(f'<tr><td class="csf-outcome-history-cell" colspan="7"><div class="csf-outcome-history" aria-label="Audit history for {esc(outcome_id)}">{history_items}</div></td></tr>')
     outcome_rows = "".join(outcome_rows_list)
@@ -4438,7 +4938,7 @@ def render_profile_editor_page(
     )
     catalog_save = '<button class="btn" type="submit">Save control catalogs</button>' if editable else ''
     control_catalog_section = f'''<section class="csf-assessment-block"><h3>Control catalogs</h3><div class="mini">{esc(catalog_summary)}</div><form method="post" action="/set-csf-control-catalogs"><input type="hidden" name="profile_id" value="{esc(str(profile.get("profile_id") or ""))}"><input type="hidden" name="profile_name" value="{esc(profile_name)}"><div class="csf-status-options" style="margin-top:8px">{catalog_choices}</div><div class="task-actions" style="margin-top:8px">{catalog_save}</div></form></section>'''
-    body = f'''<section class="panel stack"><div class="kicker">{esc(profile_label)}</div><h2>{esc(profile_name)}</h2><div class="mini">{esc(str(profile.get("context_summary") or ""))}</div><div class="mini">Community Profile source: {esc(str(profile.get("community_profile_source") or "NIST CSF 2.0 base only"))}</div>{control_catalog_section}<div class="profile-tailoring-head"><h3>Categories and Subcategories</h3><a class="btn" href="{esc(log_url)}">View log</a></div><div class="mini">{len(outcomes)} official NIST CSF records are available for tailoring. Out-of-scope and unselected outcomes are hidden from the CSF workspace.</div><table><thead><tr><th>Outcome</th><th>Type</th><th>Profile status</th><th>Target assessment</th><th>Reason</th><th>Supporting evidence</th><th></th></tr></thead><tbody>{outcome_rows}</tbody></table><div class="task-actions"><a class="btn" href="/">Back to workspace</a>{delete_control}</div></section>'''
+    body = f'''<section class="panel stack"><div class="kicker">{esc(profile_label)}</div><h2>{esc(profile_name)}</h2><div class="mini">{esc(str(profile.get("context_summary") or ""))}</div><div class="mini">Community Profile source: {esc(str(profile.get("community_profile_source") or "NIST CSF 2.0 base only"))}</div>{control_catalog_section}<div class="profile-tailoring-head"><h3>Categories and Subcategories</h3><a class="btn" href="{esc(log_url)}">View log</a></div><div class="mini">{len(outcomes)} official NIST CSF records are available for tailoring. Out-of-scope and unselected outcomes are hidden from the CSF workspace.</div><table><thead><tr><th>Outcome</th><th>Type</th><th>Profile status</th><th>Target assessment</th><th>Reason</th><th>Supporting evidence</th><th></th></tr></thead><tbody>{outcome_rows}</tbody></table><div class="task-actions">{delete_control}</div></section>'''
     return render_page_shell(build_dashboard_model(config, snapshot, ""), "/profile", "Profile editor", "View this profile’s immutable creation and tailoring history.", body, show_technical_nav=persona_allows_diagnostics(config.ui_persona))
 
 
@@ -4450,6 +4950,8 @@ def render_profile_editor_page(
     outcomes: List[Dict[str, Any]],
     control_catalogs: Optional[List[Dict[str, Any]]] = None,
     saved_outcome_id: str = "",
+    tier_assessment: Optional[Dict[str, Any]] = None,
+    tier_events: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Render one staged Profile-edit form so related tailoring saves together."""
     profile_kind = str(profile.get("profile_kind") or "organizational")
@@ -4459,6 +4961,54 @@ def render_profile_editor_page(
     value_labels = {"not_selected": "Not selected", "included": "Included", "inherited": "Inherited", "out_of_scope": "Out of scope", "fully_implemented": "Fully implemented", "partly_implemented": "Partly implemented", "not_implemented": "Not implemented", "not_applicable": "Not applicable"}
     status_options = [("not_selected", "Not selected"), ("included", "Included"), ("inherited", "Inherited"), ("out_of_scope", "Out of scope")]
     target_options = [("fully_implemented", "Fully implemented"), ("partly_implemented", "Partly implemented"), ("not_implemented", "Not implemented"), ("not_applicable", "Not applicable")]
+
+    def profile_audit_change(event: Dict[str, Any]) -> str:
+        field = str(event.get("field_name") or "")
+        if not field:
+            return str(event.get("event_type") or "").replace("_", " ").title()
+        label = {"profile_status": "Profile status", "target_assessment_level": "Target assessment"}.get(field, field)
+
+        def display_value(raw: Any) -> str:
+            try:
+                value = json.loads(str(raw))
+            except (TypeError, ValueError):
+                value = raw
+            if value in (None, ""):
+                return "No target" if field == "target_assessment_level" else "None"
+            return value_labels.get(str(value), str(value))
+
+        return f"{label}: {display_value(event.get('old_value_json'))} -> {display_value(event.get('new_value_json'))}"
+    tier_assessment = tier_assessment or {}
+    tier_events = tier_events or []
+    tier_names = {1: "Tier 1 - Partial", 2: "Tier 2 - Risk Informed", 3: "Tier 3 - Repeatable", 4: "Tier 4 - Adaptive"}
+
+    def tier_picker(field_name: str, selected: Any) -> str:
+        try:
+            selected_level = int(selected) if selected is not None else None
+        except (TypeError, ValueError):
+            selected_level = None
+        options = ['<option value="">Not recorded</option>']
+        options.extend(
+            f'<option value="{level}"{" selected" if level == selected_level else ""}>{esc(name)}</option>'
+            for level, name in tier_names.items()
+        )
+        return f'<select name="{field_name}">{"".join(options)}</select>'
+
+    profile_id = str(profile.get("profile_id") or "")
+    tier_history_url = "/profile-tier-audit?" + urllib.parse.urlencode({"profile_id": profile_id, "name": profile_name})
+    tier_guidance_url = "/tier-guidance?" + urllib.parse.urlencode({"return_to": "/profile?name=" + profile_name})
+    if editable:
+        target_tier_control = tier_picker("target_tier_level", tier_assessment.get("target_tier_level"))
+        current_tier_control = tier_picker("current_tier_level", tier_assessment.get("current_tier_level"))
+        target_tier_reason = f'<textarea name="target_tier_rationale" maxlength="4000" placeholder="Why is this the appropriate Tier target for this Profile?">{esc(str(tier_assessment.get("target_rationale") or ""))}</textarea>'
+        current_tier_reason = f'<textarea name="current_tier_rationale" maxlength="4000" placeholder="What observed practices support this current Tier judgment?">{esc(str(tier_assessment.get("current_rationale") or ""))}</textarea>'
+    else:
+        target_tier_control = esc(tier_names.get(tier_assessment.get("target_tier_level"), "Not recorded"))
+        current_tier_control = esc(tier_names.get(tier_assessment.get("current_tier_level"), "Not recorded"))
+        target_tier_reason = esc(str(tier_assessment.get("target_rationale") or "No rationale recorded."))
+        current_tier_reason = esc(str(tier_assessment.get("current_rationale") or "No rationale recorded."))
+    tier_status = "No Tier characterization has been recorded." if not tier_events else f"{len(tier_events)} Tier history event{'s' if len(tier_events) != 1 else ''} recorded."
+    tier_section = f'''<section class="csf-assessment-block"><div class="profile-tailoring-head"><h3>CSF Tiers</h3><div class="task-actions"><a class="btn" href="{esc(tier_guidance_url)}">View Tier guidance</a><a class="btn" href="{esc(tier_history_url)}">View Tier history</a></div></div><div class="mini">Record an analyst judgment about this Profile's risk-governance and management rigor. A Tier is not calculated from controls or outcome assessments.</div><div class="csf-assessment-comparison" style="margin-top:8px"><div class="csf-assessment-block" style="display:grid; gap:7px"><strong>Target Tier</strong>{target_tier_control}<label style="display:grid; gap:4px">Why target this Tier?{target_tier_reason}</label></div><div class="csf-assessment-block" style="display:grid; gap:7px"><strong>Current Tier</strong>{current_tier_control}<label style="display:grid; gap:4px">Why is this the current Tier?{current_tier_reason}</label></div></div><div class="mini" style="margin-top:8px">{esc(tier_status)}</div></section>'''
 
     events_by_outcome: Dict[str, List[Dict[str, Any]]] = {}
     for event in events:
@@ -4475,7 +5025,7 @@ def render_profile_editor_page(
             target = str(row.get("target_assessment_level") or "fully_implemented")
             target_markup = "".join(f'<option value="{value}"{" selected" if value == target else ""}>{label}</option>' for value, label in target_options)
             target_control = f'<select name="target_level__{esc(outcome_id)}">{target_markup}</select>'
-            rationale_control = f'<input name="rationale__{esc(outcome_id)}" required maxlength="2000" aria-label="Reason for {esc(outcome_id)} Target assessment" value="{esc(str(row.get("rationale") or ""))}" placeholder="Why target this outcome?">'
+            rationale_control = f'<input name="rationale__{esc(outcome_id)}" maxlength="2000" aria-label="Reason for {esc(outcome_id)} Target assessment" value="{esc(str(row.get("rationale") or ""))}" placeholder="Why target this outcome?">'
             evidence_control = f'<input name="supporting_evidence__{esc(outcome_id)}" maxlength="1000" aria-label="Supporting evidence for {esc(outcome_id)} Target assessment" value="{esc(str(row.get("supporting_evidence_reference") or ""))}" placeholder="Optional record, document, or URL">'
         else:
             target_control = '<span class="mini">Set after including</span>' if outcome_type == "subcategory" else '<span class="mini">Category rollup</span>'
@@ -4484,7 +5034,7 @@ def render_profile_editor_page(
         outcome_rows.append(f'<tr><td>{esc(outcome_id)}</td><td>{esc(outcome_type.title())}</td><td>{status_control}</td><td>{target_control}</td><td>{rationale_control}</td><td>{evidence_control}</td></tr>')
         history = events_by_outcome.get(outcome_id, [])
         if outcome_type == "subcategory" and history:
-            history_rows = "".join(f'<div class="csf-outcome-history-item"><span>{esc(pretty_time(item.get("recorded_at")))}</span><strong>{esc(str(item.get("field_name") or item.get("event_type") or "").replace("_", " ").title())}</strong><span>{esc(str(item.get("rationale") or ""))}</span><span>{esc(str(item.get("supporting_evidence_reference") or ""))}</span></div>' for item in reversed(history))
+            history_rows = "".join(f'<div class="csf-outcome-history-item"><span>{esc(pretty_time(item.get("recorded_at")))}</span><strong>{esc(profile_audit_change(item))}</strong><span>{esc(str(item.get("rationale") or ""))}</span><span>{esc(str(item.get("supporting_evidence_reference") or ""))}</span></div>' for item in history)
             outcome_rows.append(f'<tr><td class="csf-outcome-history-cell" colspan="6"><div class="csf-outcome-history" aria-label="Audit history for {esc(outcome_id)}">{history_rows}</div></td></tr>')
 
     catalog_choices = "".join(
@@ -4499,7 +5049,11 @@ def render_profile_editor_page(
     log_url = "/profile-audit?name=" + urllib.parse.quote(profile_name, safe="")
     delete_control = "" if not editable or profile_name == "Single-PC baseline" else f'<form method="post" action="/archive-csf-profile"><input type="hidden" name="profile_name" value="{esc(profile_name)}"><button class="btn danger" type="submit" data-confirm-profile-delete>Delete profile</button></form>'
     controls = f'<section class="csf-assessment-block"><h3>Control catalogs</h3><div class="mini">Select the control frameworks whose mapped controls should appear when actions are added to this Profile.</div><div class="csf-status-options" style="margin-top:8px">{catalog_choices}</div></section>' if editable else f'<section class="csf-assessment-block"><h3>Control catalogs</h3><div class="csf-status-options">{catalog_choices}</div></section>'
-    body = f'''<section class="panel stack"><div class="kicker">{esc(profile_label)}</div><h2>{esc(profile_name)}</h2><div class="mini">{esc(str(profile.get("context_summary") or ""))}</div><div class="mini">Community Profile source: {esc(str(profile.get("community_profile_source") or "NIST CSF 2.0 base only"))}</div><form id="profile-edit-form" class="stack" method="post" action="/save-csf-profile-changes"><input type="hidden" name="profile_name" value="{esc(profile_name)}">{controls}<div class="profile-tailoring-head"><h3>Categories and Subcategories</h3><div class="task-actions"><a class="btn" href="{esc(log_url)}">View log</a>{save_button}</div></div><div class="mini">{len(outcomes)} official NIST CSF records are available for tailoring. Out-of-scope and unselected outcomes are hidden from the CSF workspace.</div><table><thead><tr><th>Outcome</th><th>Type</th><th>Profile status</th><th>Target assessment</th><th>Reason</th><th>Supporting evidence</th></tr></thead><tbody>{''.join(outcome_rows)}</tbody></table></form><div class="task-actions"><a class="btn" href="/">Back to workspace</a>{delete_control}</div></section>'''
+    profile_heading = render_tile_return_header(
+        f'<div class="kicker">{esc(profile_label)}</div><h2>{esc(profile_name)}</h2>',
+        "/", "Back to Configure",
+    )
+    body = f'''<section class="panel stack">{profile_heading}<div class="mini">{esc(str(profile.get("context_summary") or ""))}</div><div class="mini">Community Profile source: {esc(str(profile.get("community_profile_source") or "NIST CSF 2.0 base only"))}</div><form id="profile-edit-form" class="stack" method="post" action="/save-csf-profile-changes"><input type="hidden" name="profile_name" value="{esc(profile_name)}">{tier_section}{controls}<div class="profile-tailoring-head"><h3>Categories and Subcategories</h3><div class="task-actions"><a class="btn" href="{esc(log_url)}">View log</a>{save_button}</div></div><div class="mini">{len(outcomes)} official NIST CSF records are available for tailoring. Out-of-scope and unselected outcomes are hidden from the CSF workspace.</div><table><thead><tr><th>Outcome</th><th>Type</th><th>Profile status</th><th>Target assessment</th><th>Reason</th><th>Supporting evidence</th></tr></thead><tbody>{''.join(outcome_rows)}</tbody></table></form><div class="task-actions">{delete_control}</div></section>'''
     return render_page_shell(build_dashboard_model(config, snapshot, ""), "/profile", "Profile editor", "View this profileâ€™s immutable creation and tailoring history.", body, show_technical_nav=persona_allows_diagnostics(config.ui_persona))
 
 
@@ -4534,14 +5088,83 @@ def render_profile_audit_log_page(config: AppConfig, snapshot: Dict[str, Any], p
         f'<td class="audit-recorded-by">{esc(str(event.get("recorded_by") or "System"))}</td>'
         f'<td class="audit-outcome">{esc(str(event.get("outcome_id") or "Profile"))}</td>'
         f'<td class="audit-change">{esc(change_text(event))}</td>'
-        f'<td class="audit-reason">{esc(str(event.get("rationale") or ""))}</td>'
-        f'<td class="audit-evidence">{esc(str(event.get("supporting_evidence_reference") or ""))}</td></tr>'
+        f'<td class="audit-reason">{esc(str(event.get("rationale") or ""))}</td></tr>'
         for event in events
-    ) or '<tr><td colspan="6">No events recorded.</td></tr>'
+    ) or '<tr><td colspan="5">No events recorded.</td></tr>'
     profile_name = str(profile.get("profile_name") or "")
     back_url = "/profile?name=" + urllib.parse.quote(profile_name, safe="")
-    body = f'''<section class="panel stack"><div class="kicker">Organizational Profile</div><h2>Profile audit log</h2><div class="mini">{esc(profile_name)} — immutable creation and tailoring history.</div><table class="profile-audit-log"><thead><tr><th class="audit-recorded-at" scope="col">Recorded at</th><th class="audit-recorded-by" scope="col">Recorded by</th><th class="audit-outcome" scope="col">Affected outcome</th><th class="audit-change" scope="col">Change made</th><th class="audit-reason" scope="col">Reason</th><th class="audit-evidence" scope="col">Supporting evidence</th></tr></thead><tbody>{rows}</tbody></table><div class="task-actions"><a class="btn" href="{esc(back_url)}">Back to profile</a></div></section>'''
-    return render_page_shell(build_dashboard_model(config, snapshot, ""), "/profile-audit", "Profile audit log", "Review the chronological, append-only profile history.", body, show_technical_nav=persona_allows_diagnostics(config.ui_persona))
+    audit_heading = render_tile_return_header(
+        '<div class="kicker">Organizational Profile</div><h2>Profile audit log</h2>',
+        back_url, "Back to Profile",
+    )
+    body = f'''<section class="panel stack">{audit_heading}<div class="mini">{esc(profile_name)} — immutable creation and tailoring history.</div><table class="profile-audit-log"><thead><tr><th class="audit-recorded-at" scope="col">Recorded at</th><th class="audit-recorded-by" scope="col">Recorded by</th><th class="audit-outcome" scope="col">Affected outcome</th><th class="audit-change" scope="col">Change made</th><th class="audit-reason" scope="col">Reason</th></tr></thead><tbody>{rows}</tbody></table></section>'''
+    return render_page_shell(
+        build_dashboard_model(config, snapshot, ""), "/profile-audit", "Profile audit log",
+        "Review the chronological, append-only profile history.", body,
+        show_technical_nav=persona_allows_diagnostics(config.ui_persona),
+        return_href=back_url, return_label="Back to profile",
+    )
+
+
+def render_profile_tier_audit_log_page(
+    config: AppConfig, snapshot: Dict[str, Any], profile: Dict[str, Any], events: List[Dict[str, Any]]
+) -> str:
+    """Render a Profile's separate immutable Tier-characterization history."""
+    tier_names = {1: "Tier 1 - Partial", 2: "Tier 2 - Risk Informed", 3: "Tier 3 - Repeatable", 4: "Tier 4 - Adaptive"}
+
+    def display_value(raw: Any) -> str:
+        try:
+            value = json.loads(str(raw))
+        except (TypeError, ValueError):
+            value = raw
+        try:
+            return tier_names.get(int(value), str(value or "Not recorded"))
+        except (TypeError, ValueError):
+            return str(value or "Not recorded")
+
+    field_labels = {"target_tier": "Target Tier", "current_tier": "Current Tier"}
+    rows = "".join(
+        f'<tr><td class="audit-recorded-at">{esc(pretty_time(event.get("recorded_at")))}</td>'
+        f'<td class="audit-recorded-by">{esc(str(event.get("recorded_by") or "System"))}</td>'
+        f'<td class="audit-change">{esc(field_labels.get(str(event.get("field_name") or ""), str(event.get("field_name") or "Tier")))}: {display_value(event.get("old_value_json"))} -> {display_value(event.get("new_value_json"))}</td>'
+        f'<td class="audit-reason">{esc(str(event.get("rationale") or ""))}</td></tr>'
+        for event in events
+    ) or '<tr><td colspan="4">No Tier history is recorded.</td></tr>'
+    profile_name = str(profile.get("profile_name") or "")
+    back_url = "/profile?name=" + urllib.parse.quote(profile_name, safe="")
+    body = f'''<section class="panel stack"><div class="kicker">Organizational Profile</div><h2>Tier history</h2><div class="mini">{esc(profile_name)} — immutable current and target Tier history.</div><table class="profile-audit-log"><thead><tr><th class="audit-recorded-at" scope="col">Recorded at</th><th class="audit-recorded-by" scope="col">Recorded by</th><th class="audit-change" scope="col">Tier change</th><th class="audit-reason" scope="col">Rationale</th></tr></thead><tbody>{rows}</tbody></table></section>'''
+    return render_page_shell(
+        build_dashboard_model(config, snapshot, ""), "/profile-tier-audit", "Tier history",
+        "Review the append-only Tier characterization history.", body,
+        show_technical_nav=persona_allows_diagnostics(config.ui_persona),
+        return_href=back_url, return_label="Back to profile",
+    )
+
+
+def render_tier_guidance_page(
+    config: AppConfig, snapshot: Dict[str, Any], guidance: List[Dict[str, Any]], return_to: str = "/"
+) -> str:
+    """Render source-traceable NIST Tier text beside clearly labeled product guidance."""
+    sections: List[str] = []
+    for record in guidance:
+        hints = "".join(
+            f'<li style="margin:0"><strong>{esc(str(item.get("hint") or ""))}</strong> <span class="mini">Example: {esc(str(item.get("example") or "")).replace(chr(10), "<br>")}</span></li>'
+            for item in (record.get("transition_hints") or [])
+        )
+        sections.append(
+            f'''<section class="csf-assessment-block stack"><h3>Tier {esc(str(record.get("tier_level") or ""))} — {esc(str(record.get("tier_name") or ""))}</h3><div><strong>Official NIST governance characteristics</strong><p>{esc(str(record.get("official_governance_text") or ""))}</p></div><div><strong>Official NIST management characteristics</strong><p>{esc(str(record.get("official_management_text") or ""))}</p></div><div><strong>Plain-language interpretation</strong><p>{esc(str(record.get("plain_language_text") or ""))}</p></div><div><strong>{esc(str(record.get("transition_label") or "Things to consider"))}</strong><ul style="margin:0; padding-left:18px">{hints}</ul></div></section>'''
+        )
+    notice = str(guidance[0].get("product_guidance_notice") or "") if guidance else ""
+    source = guidance[0] if guidance else {}
+    safe_return_to = return_to if return_to.startswith("/profile?") else "/"
+    return_label = "Back to profile" if safe_return_to != "/" else "Back to workspace"
+    body = f'''<section class="panel stack"><div class="kicker">CSF Tiers</div><h2>Tier guidance</h2><div class="mini"><strong>Official source:</strong> {esc(str(source.get("source_name") or ""))}, {esc(str(source.get("source_version") or ""))}, {esc(str(source.get("source_locator") or ""))}.</div><div class="mini">{esc(notice)}</div>{''.join(sections)}</section>'''
+    return render_page_shell(
+        build_dashboard_model(config, snapshot, ""), "/tier-guidance", "Tier guidance",
+        "Read official Tier characteristics and product-authored learning guidance.", body,
+        show_technical_nav=persona_allows_diagnostics(config.ui_persona),
+        return_href=safe_return_to, return_label=return_label,
+    )
 
 
 def render_govern_page(config: AppConfig, snapshot: Dict[str, Any], message: str = "") -> str:
@@ -4689,7 +5312,7 @@ def render_detect_evidence_snapshot_page(config: AppConfig, snapshot: Dict[str, 
     persona_id = config.ui_persona
     detail = build_detection_snapshot_detail(config, snapshot)
     if not detail.get("available"):
-        body = f'<section class="panel stack" style="margin-top:18px"><div class="kicker">Detect</div><h2>Evidence Snapshot</h2><div class="finding">{esc(detail.get("reason") or "Evidence snapshot details are unavailable.")}</div><div class="task-actions"><a class="btn" href="/detect">Back to Detect</a></div></section>'
+        body = f'<section class="panel stack" style="margin-top:18px"><div class="kicker">Detect</div><h2>Evidence Snapshot</h2><div class="finding">{esc(detail.get("reason") or "Evidence snapshot details are unavailable.")}</div></section>'
     else:
         snapshot_row = detail["snapshot"]
         counts_rows = "".join(f"<tr><td>{esc(name)}</td><td>{esc(value)}</td></tr>" for name, value in detail["counts"].items())
@@ -4722,7 +5345,7 @@ def render_detect_evidence_snapshot_page(config: AppConfig, snapshot: Dict[str, 
   <table><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>{coverage_rows}</tbody></table>
 </section>
 """
-    return render_page_shell(model, "/detect/evidence-snapshot", "Detect evidence snapshot", simplify_for_home(persona_id, "This page shows the latest indexed local evidence snapshot and the observation counts behind snapshot-aware IOC matching.", "This page shows the detailed evidence collected for the latest detection check."), body, show_technical_nav=persona_allows_diagnostics(persona_id))
+    return render_page_shell(model, "/detect/evidence-snapshot", "Detect evidence snapshot", simplify_for_home(persona_id, "This page shows the latest indexed local evidence snapshot and the observation counts behind snapshot-aware IOC matching.", "This page shows the detailed evidence collected for the latest detection check."), body, show_technical_nav=persona_allows_diagnostics(persona_id), return_href="/detect", return_label="Back to Detect")
 
 
 def render_respond_summary_cards(cards: List[Dict[str, Any]]) -> str:
@@ -5000,6 +5623,9 @@ class CodexUiHandler(BaseHTTPRequestHandler):
         snapshot["csf_information_flow"] = get_sqlite_csf_information_flow(
             self.app_config.state_db_path, selected_subcategory_id
         )
+        snapshot["csf_capability_context"] = get_sqlite_csf_capability_context(
+            self.app_config.state_db_path, selected_subcategory_id
+        )
         snapshot["csf_explorer_selection"] = dict(explorer_selection or {})
         return snapshot
 
@@ -5106,6 +5732,44 @@ class CodexUiHandler(BaseHTTPRequestHandler):
                 snapshot = self.get_ui_snapshot(parsed.path, force_live=force_live)
                 return self.respond_ui_page(render_control_catalogs_page(self.app_config, snapshot, message), fragment)
 
+            if parsed.path == "/plans":
+                message = params.get("message", [""])[0]
+                snapshot = self.get_ui_snapshot(parsed.path, force_live=force_live)
+                return self.respond_ui_page(render_plans_page(self.app_config, snapshot, message), fragment)
+
+            if parsed.path == "/csf-plan":
+                plan_id = params.get("plan_id", [""])[0].strip()
+                is_new = params.get("new", [""])[0].strip() == "1"
+                connection = ioc_store.connect_db(self.app_config.state_db_path)
+                try:
+                    ioc_store.init_db(connection)
+                    profile = ioc_store.get_active_csf_profile(connection)
+                    if is_new and str(profile.get("profile_kind") or "") != "organizational":
+                        return self.respond_error(HTTPStatus.FORBIDDEN, "Frozen base and Community Profiles are read-only.")
+                    plan = None if is_new else next(
+                        (item for item in ioc_store.list_csf_plans(connection, profile.get("profile_id"), include_archived=True)
+                         if str(item.get("plan_id") or "") == plan_id),
+                        None,
+                    )
+                    if not is_new and plan is None:
+                        return self.respond_error(HTTPStatus.NOT_FOUND, "Plan not found in the active Profile.")
+                    actions = [] if plan is None else ioc_store.list_csf_profile_actions(
+                        connection, profile.get("profile_id"), plan_id=plan.get("plan_id")
+                    )
+                    unplanned_actions = [] if plan is None else ioc_store.list_csf_profile_actions(
+                        connection, profile.get("profile_id"), plan_id=""
+                    )
+                    events = [] if plan is None else [
+                        event for event in ioc_store.list_csf_plan_audit_events(connection, profile.get("profile_id"))
+                        if str(event.get("plan_id") or "") == str(plan.get("plan_id") or "")
+                    ]
+                finally:
+                    connection.close()
+                modal = render_csf_plan_modal(profile, plan, actions, events, unplanned_actions)
+                if fragment == "modal":
+                    return self.respond_html(modal)
+                return self.respond_html(html_page("CSF Plan", modal))
+
             if parsed.path == "/evidence":
                 message = params.get("message", [""])[0]
                 snapshot = self.get_ui_snapshot(parsed.path, force_live=force_live)
@@ -5127,6 +5791,42 @@ class CodexUiHandler(BaseHTTPRequestHandler):
                 snapshot = self.get_ui_snapshot(parsed.path, force_live=force_live)
                 return self.respond_ui_page(render_profile_creation_page(self.app_config, snapshot), fragment)
 
+            if parsed.path == "/tier-guidance":
+                connection = ioc_store.connect_db(self.app_config.state_db_path)
+                try:
+                    ioc_store.init_db(connection)
+                    tier_guidance = ioc_store.list_csf_tier_guidance(connection)
+                finally:
+                    connection.close()
+                snapshot = self.get_ui_snapshot(parsed.path, force_live=force_live)
+                return self.respond_ui_page(
+                    render_tier_guidance_page(
+                        self.app_config, snapshot, tier_guidance,
+                        params.get("return_to", ["/"])[0],
+                    ),
+                    fragment,
+                )
+
+            if parsed.path == "/profile-tier-audit":
+                profile_id = params.get("profile_id", [""])[0].strip()
+                profile_name = params.get("name", [""])[0].strip()
+                connection = ioc_store.connect_db(self.app_config.state_db_path)
+                try:
+                    ioc_store.init_db(connection)
+                    profiles = ioc_store.list_csf_profile_definitions(connection)
+                    profile = next((row for row in profiles if str(row.get("profile_id") or "") == profile_id), None)
+                    if profile is None and profile_name:
+                        profile = next((row for row in profiles if str(row.get("profile_name") or "") == profile_name), None)
+                    if profile is None:
+                        return self.respond_error(HTTPStatus.NOT_FOUND, "Profile not found.")
+                    tier_events = ioc_store.list_csf_profile_tier_audit_events(connection, profile.get("profile_id"))
+                finally:
+                    connection.close()
+                snapshot = self.get_ui_snapshot(parsed.path, force_live=force_live)
+                return self.respond_ui_page(
+                    render_profile_tier_audit_log_page(self.app_config, snapshot, profile, tier_events), fragment,
+                )
+
             if parsed.path == "/profile":
                 profile_name = params.get("name", [""])[0].strip()
                 connection = ioc_store.connect_db(self.app_config.state_db_path)
@@ -5138,6 +5838,8 @@ class CodexUiHandler(BaseHTTPRequestHandler):
                     events = ioc_store.list_csf_profile_audit_events(connection, profile_name)
                     outcomes = ioc_store.list_csf_profile_outcomes(connection, profile_name)
                     catalogs = ioc_store.list_csf_profile_control_catalogs(connection, profile.get("profile_id"))
+                    tier_assessment = ioc_store.get_csf_profile_tier_assessment(connection, profile.get("profile_id"))
+                    tier_events = ioc_store.list_csf_profile_tier_audit_events(connection, profile.get("profile_id"))
                 finally:
                     connection.close()
                 snapshot = self.get_ui_snapshot(parsed.path, force_live=force_live)
@@ -5145,6 +5847,7 @@ class CodexUiHandler(BaseHTTPRequestHandler):
                     render_profile_editor_page(
                         self.app_config, snapshot, profile, events, outcomes, catalogs,
                         params.get("saved", params.get("saved_outcome", [""]))[0].strip().upper(),
+                        tier_assessment, tier_events,
                     ),
                     fragment,
                 )
@@ -5241,13 +5944,16 @@ class CodexUiHandler(BaseHTTPRequestHandler):
                 record = next((row for row in records["reviewed_actions" if is_action else "supporting_basis"] if str(row.get("action_id" if is_action else "basis_id")) == record_id), None)
                 action_updates: List[Dict[str, Any]] = []
                 evidence_link_events: List[Dict[str, Any]] = []
-                if is_action and record is not None:
+                plans: List[Dict[str, Any]] = []
+                if is_action:
                     connection = ioc_store.connect_db(self.app_config.state_db_path)
                     try:
-                        action_updates = ioc_store.list_csf_reviewed_action_updates(connection, record_id)
-                        evidence_link_events = ioc_store.list_csf_evidence_link_audit_events(
-                            connection, active_profile_id, target_type="action", target_id=record_id
-                        )
+                        plans = ioc_store.list_csf_plans(connection, active_profile_id)
+                        if record is not None:
+                            action_updates = ioc_store.list_csf_reviewed_action_updates(connection, record_id)
+                            evidence_link_events = ioc_store.list_csf_evidence_link_audit_events(
+                                connection, active_profile_id, target_type="action", target_id=record_id
+                            )
                     finally:
                         connection.close()
                 generic_examples = list_sqlite_csf_generic_action_examples(
@@ -5275,6 +5981,7 @@ class CodexUiHandler(BaseHTTPRequestHandler):
                     int(records.get("enabled_control_catalog_count") or 0),
                     sample_opportunity,
                     evidence_link_events,
+                    plans,
                 )
                 if fragment == "modal":
                     return self.respond_html(modal)
@@ -5309,6 +6016,7 @@ class CodexUiHandler(BaseHTTPRequestHandler):
                 "/reports",
                 "/diagnostics",
                 "/control-catalogs",
+                "/plans",
                 "/evidence",
                 "/audit-log",
                 "/profile",
@@ -5412,6 +6120,27 @@ class CodexUiHandler(BaseHTTPRequestHandler):
                                 getpass.getuser(), requested_evidence,
                             )
                     profile_id = str(definition.get("profile_id") or "")
+                    tier_assessment = ioc_store.get_csf_profile_tier_assessment(connection, profile_id)
+                    requested_target_tier = payload.get("target_tier_level", [""])[0].strip()
+                    requested_target_reason = payload.get("target_tier_rationale", [""])[0]
+                    if requested_target_tier and (
+                        requested_target_tier != str(tier_assessment.get("target_tier_level") or "")
+                        or requested_target_reason != str(tier_assessment.get("target_rationale") or "")
+                    ):
+                        ioc_store.set_csf_profile_target_tier(
+                            connection, profile_id, requested_target_tier,
+                            requested_target_reason, getpass.getuser(),
+                        )
+                    requested_current_tier = payload.get("current_tier_level", [""])[0].strip()
+                    requested_current_reason = payload.get("current_tier_rationale", [""])[0]
+                    if requested_current_tier and (
+                        requested_current_tier != str(tier_assessment.get("current_tier_level") or "")
+                        or requested_current_reason != str(tier_assessment.get("current_rationale") or "")
+                    ):
+                        ioc_store.set_csf_profile_current_tier(
+                            connection, profile_id, requested_current_tier,
+                            requested_current_reason, getpass.getuser(),
+                        )
                     catalogs = ioc_store.list_csf_profile_control_catalogs(connection, profile_id)
                     registered_frameworks = {str(catalog["framework_id"]) for catalog in catalogs}
                     unknown_frameworks = selected_frameworks - registered_frameworks
@@ -5421,11 +6150,12 @@ class CodexUiHandler(BaseHTTPRequestHandler):
                     if previous_frameworks != sorted(selected_frameworks):
                         for framework_id in registered_frameworks:
                             ioc_store.set_csf_profile_control_catalog_enabled(connection, profile_id, framework_id, framework_id in selected_frameworks, getpass.getuser())
-                        ioc_store.record_csf_profile_audit_event(
-                            connection, profile_name=profile_name, event_type="profile_updated", field_name="control_catalogs",
-                            old_value=previous_frameworks, new_value=sorted(selected_frameworks),
-                            rationale="Control catalog selection changed.", recorded_by=getpass.getuser(),
-                        )
+                        with connection:
+                            ioc_store.record_csf_profile_audit_event(
+                                connection, profile_name=profile_name, event_type="profile_updated", field_name="control_catalogs",
+                                old_value=previous_frameworks, new_value=sorted(selected_frameworks),
+                                rationale="Control catalog selection changed.", recorded_by=getpass.getuser(),
+                            )
                 finally:
                     connection.close()
                 return self.redirect("/profile?name=" + urllib.parse.quote(profile_name, safe="") + "&saved=1")
@@ -5546,6 +6276,113 @@ class CodexUiHandler(BaseHTTPRequestHandler):
                 )
                 return self.redirect(return_to + "?" + redirect_params)
 
+            if parsed.path == "/create-csf-plan":
+                connection = ioc_store.connect_db(self.app_config.state_db_path)
+                try:
+                    ioc_store.init_db(connection)
+                    active_profile = ioc_store.get_active_csf_profile(connection)
+                    if str(active_profile.get("profile_kind") or "") != "organizational":
+                        raise RuntimeError("Frozen base and Community Profiles are read-only. Create or select an Organizational Profile to create a Plan.")
+                    ioc_store.create_csf_plan(
+                        connection,
+                        profile_id=active_profile.get("profile_id"),
+                        plan_name=payload.get("plan_name", [""])[0],
+                        purpose=payload.get("purpose", [""])[0],
+                        plan_status=payload.get("plan_status", ["draft"])[0],
+                        plan_priority=payload.get("plan_priority", ["normal"])[0],
+                        owner_name=payload.get("owner_name", [""])[0],
+                        target_on=payload.get("target_on", [""])[0],
+                        rationale=payload.get("rationale", [""])[0],
+                        created_by=getpass.getuser(),
+                    )
+                finally:
+                    connection.close()
+                return self.redirect("/plans?message=" + urllib.parse.quote("Plan created."))
+
+            if parsed.path == "/update-csf-plan":
+                connection = ioc_store.connect_db(self.app_config.state_db_path)
+                try:
+                    ioc_store.init_db(connection)
+                    active_profile = ioc_store.get_active_csf_profile(connection)
+                    if str(active_profile.get("profile_kind") or "") != "organizational":
+                        raise RuntimeError("Frozen base and Community Profiles are read-only. Create or select an Organizational Profile to update a Plan.")
+                    ioc_store.update_csf_plan(
+                        connection,
+                        plan_id=payload.get("plan_id", [""])[0],
+                        plan_name=payload.get("plan_name", [""])[0],
+                        purpose=payload.get("purpose", [""])[0],
+                        plan_status=payload.get("plan_status", ["draft"])[0],
+                        plan_priority=payload.get("plan_priority", ["normal"])[0],
+                        owner_name=payload.get("owner_name", [""])[0],
+                        start_on=payload.get("start_on", [""])[0],
+                        target_on=payload.get("target_on", [""])[0],
+                        rationale=payload.get("rationale", [""])[0],
+                        recorded_by=getpass.getuser(),
+                    )
+                finally:
+                    connection.close()
+                return self.redirect("/plans?message=" + urllib.parse.quote("Plan updated."))
+
+            if parsed.path == "/assign-csf-action-plan":
+                action_id = payload.get("action_id", [""])[0].strip()
+                plan_id = payload.get("plan_id", [""])[0].strip()
+                rationale = payload.get("rationale", [""])[0].strip() or "Assigned from the Plans workspace."
+                connection = ioc_store.connect_db(self.app_config.state_db_path)
+                try:
+                    ioc_store.init_db(connection)
+                    active_profile = ioc_store.get_active_csf_profile(connection)
+                    profile_id = str(active_profile.get("profile_id") or "")
+                    if str(active_profile.get("profile_kind") or "") != "organizational":
+                        raise RuntimeError("Frozen base and Community Profiles are read-only. Create or select an Organizational Profile to assign actions.")
+                    action = connection.execute(
+                        "SELECT profile_id, plan_id FROM csf_reviewed_actions WHERE action_id = ?", (action_id,)
+                    ).fetchone()
+                    if action is None or str(action["profile_id"] or "") != profile_id:
+                        raise RuntimeError("The selected action is not available in this Profile.")
+                    if str(action["plan_id"] or "").strip():
+                        raise RuntimeError("The selected action is already assigned to a Plan.")
+                    if not plan_id:
+                        raise RuntimeError("Choose a Plan before assigning the action.")
+                    ioc_store.set_csf_action_plan_and_priority(
+                        connection,
+                        action_id=action_id,
+                        plan_id=plan_id,
+                        rationale=rationale,
+                        recorded_by=getpass.getuser(),
+                    )
+                finally:
+                    connection.close()
+                return self.redirect("/plans?message=" + urllib.parse.quote("Action assigned to Plan."))
+
+            if parsed.path == "/unassign-csf-action-plan":
+                action_id = payload.get("action_id", [""])[0].strip()
+                plan_id = payload.get("plan_id", [""])[0].strip()
+                rationale = payload.get("rationale", [""])[0].strip() or "Released to Unplanned from Plan details."
+                connection = ioc_store.connect_db(self.app_config.state_db_path)
+                try:
+                    ioc_store.init_db(connection)
+                    active_profile = ioc_store.get_active_csf_profile(connection)
+                    profile_id = str(active_profile.get("profile_id") or "")
+                    if str(active_profile.get("profile_kind") or "") != "organizational":
+                        raise RuntimeError("Frozen base and Community Profiles are read-only. Create or select an Organizational Profile to release actions.")
+                    action = connection.execute(
+                        "SELECT profile_id, plan_id FROM csf_reviewed_actions WHERE action_id = ?", (action_id,)
+                    ).fetchone()
+                    if action is None or str(action["profile_id"] or "") != profile_id:
+                        raise RuntimeError("The selected action is not available in this Profile.")
+                    if str(action["plan_id"] or "") != plan_id:
+                        raise RuntimeError("The selected action is no longer assigned to this Plan.")
+                    ioc_store.set_csf_action_plan_and_priority(
+                        connection,
+                        action_id=action_id,
+                        plan_id="",
+                        rationale=rationale,
+                        recorded_by=getpass.getuser(),
+                    )
+                finally:
+                    connection.close()
+                return self.redirect("/plans?message=" + urllib.parse.quote("Action returned to Unplanned."))
+
             if parsed.path in {"/create-csf-reviewed-action", "/update-csf-reviewed-action", "/delete-csf-reviewed-action", "/create-csf-supporting-basis"}:
                 subcategory_id = (payload.get("subcategory_id", [""])[0] or query_params.get("csf_subcategory", [""])[0]).strip().upper()
                 category_id = (payload.get("category_id", [""])[0] or query_params.get("csf_category", [""])[0]).strip().upper()
@@ -5584,6 +6421,9 @@ class CodexUiHandler(BaseHTTPRequestHandler):
                             control_id=control_id,
                             framework_id=control_framework_id,
                             basis_ids=payload.get("basis_id", []),
+                            plan_id=payload.get("plan_id", [""])[0],
+                            action_priority=payload.get("action_priority", ["normal"])[0],
+                            priority_rationale=payload.get("priority_rationale", [""])[0],
                             created_by=getpass.getuser(),
                         )
                     elif parsed.path == "/update-csf-reviewed-action":
@@ -5603,6 +6443,15 @@ class CodexUiHandler(BaseHTTPRequestHandler):
                             progress_note=payload.get("progress_note", [""])[0],
                             updated_by=getpass.getuser(),
                             basis_ids=payload.get("basis_id", []),
+                        )
+                        ioc_store.set_csf_action_plan_and_priority(
+                            connection,
+                            action_id=action_id,
+                            plan_id=payload.get("plan_id", [""])[0],
+                            action_priority=payload.get("action_priority", ["normal"])[0],
+                            priority_rationale=payload.get("priority_rationale", [""])[0],
+                            rationale="Action planning details updated.",
+                            recorded_by=getpass.getuser(),
                         )
                     elif parsed.path == "/delete-csf-reviewed-action":
                         action_id = (payload.get("action_id", [""])[0] or query_params.get("action_id", [""])[0]).strip()

@@ -438,3 +438,145 @@ INFORMATION_USES: List[Dict[str, str]] = [
     {"information_id": "preserved_investigation_records", "consumer_subcategory_id": "RS.AN-07", "dependency_kind": "event_input", "use_reason": "Carry preserved investigation actions and records into the complete incident data record."},
     {"information_id": "incident_analysis", "consumer_subcategory_id": "RS.AN-08", "dependency_kind": "event_input", "use_reason": "Use incident investigation and preserved data to estimate and validate incident magnitude."},
 ]
+
+
+# Version 2 records one exact producer-to-consumer path per row.  It is kept
+# beside the v1 source/use catalog while the UI still reads the v1 map.
+INFORMATION_FLOW_EDGE_ITEMS: List[Dict[str, str]] = [
+    {"information_id": "risk_management_objectives", "title": "Risk-management objectives", "description": "Agreed cybersecurity risk-management objectives that guide decisions and priorities."},
+    {"information_id": "risk_appetite_tolerance", "title": "Risk appetite and tolerance", "description": "Agreed boundaries for the amount and type of cybersecurity risk the organization is prepared to accept."},
+    {"information_id": "risk_response_direction", "title": "Risk-response direction", "description": "Approved direction for avoiding, accepting, transferring, mitigating, or otherwise addressing cybersecurity risk."},
+    {"information_id": "organization_cybersecurity_roles", "title": "Organization cybersecurity roles", "description": "Internal roles and authorities for cybersecurity decisions, implementation, review, escalation, and communication."},
+    {"information_id": "supplier_third_party_roles", "title": "Supplier and third-party roles", "description": "Supplier and third-party roles, responsibilities, and points of contact for cybersecurity work."},
+    {"information_id": "hardware_inventory", "title": "Hardware inventory", "description": "Known organization-managed physical devices and hardware assets."},
+    {"information_id": "software_system_service_inventory", "title": "Software, system, and service inventory", "description": "Known software, systems, applications, and services managed or used by the organization."},
+    {"information_id": "supplier_service_inventory", "title": "Supplier-service inventory", "description": "Known externally provided services and the suppliers that provide them."},
+    {"information_id": "data_inventory", "title": "Data inventory", "description": "Known data types, records, and information resources managed by the organization."},
+    {"information_id": "validated_vulnerability_records", "title": "Validated vulnerability records", "description": "Confirmed weaknesses that affect organization assets, systems, services, or data."},
+    {"information_id": "relevant_threat_records", "title": "Relevant threat records", "description": "Recorded internal or external threats relevant to the organization and its assets."},
+    {"information_id": "likelihood_impact_analysis", "title": "Likelihood and impact analysis", "description": "Analysis of how likely a risk scenario is and the effect it could have."},
+    {"information_id": "prioritized_risk_records", "title": "Prioritized risk records", "description": "Risk records ranked or otherwise prioritized for treatment and management attention."},
+    {"information_id": "event_activity_analysis", "title": "Event activity analysis", "description": "Analysis of activity associated with a potentially adverse event."},
+    {"information_id": "event_impact_scope", "title": "Event impact and scope", "description": "Estimated impact and scope of a potentially adverse event."},
+    {"information_id": "declared_incident", "title": "Declared incident", "description": "A potentially adverse event that has met the organization’s incident declaration criteria."},
+    {"information_id": "incident_investigation_records", "title": "Incident investigation records", "description": "Investigation and root-cause analysis records describing an incident and its cause."},
+    {"information_id": "incident_scope_impact", "title": "Incident scope and impact", "description": "Validated magnitude, scope, and impact of a declared incident."},
+    {"information_id": "incident_priority", "title": "Incident priority", "description": "The established priority assigned to a validated incident."},
+    {"information_id": "recovery_priorities_actions", "title": "Recovery priorities and actions", "description": "Selected recovery actions and the priority order for restoring systems, services, and data."},
+    {"information_id": "restoration_verification_status", "title": "Restoration verification status", "description": "Integrity verification, restoration status, and confirmation of normal operation."},
+    {"information_id": "incident_response_plan_coordination", "title": "Incident-response plan and coordination arrangements", "description": "The response plan and relevant coordination arrangements used after an incident is declared."},
+    {"information_id": "risk_management_measurement_criteria", "title": "Risk-management measurement criteria", "description": "Agreed KPIs, KRIs, measures, and thresholds used to evaluate cybersecurity risk-management performance."},
+]
+
+
+def _flow_edges(source: str, information_id: str, consumers: List[str], dependency_kind: str, use_reason: str) -> List[Dict[str, str]]:
+    """Create explicit, reviewable v2 paths without joining source/use lists."""
+    source_kind = "external" if source.startswith("External:") else "subcategory"
+    source_key = source.removeprefix("External: ") if source_kind == "external" else source
+    return [
+        {
+            "edge_id": f"v2:{source_kind}:{source_key}:{information_id}:{consumer}",
+            "information_id": information_id,
+            "source_kind": source_kind,
+            "source_subcategory_id": source_key if source_kind == "subcategory" else None,
+            "external_source_label": source_key if source_kind == "external" else None,
+            "source_guidance": "This outcome, an equivalent existing record, or a custom action may provide this information.",
+            "consumer_subcategory_id": consumer,
+            "dependency_kind": dependency_kind,
+            "use_reason": use_reason,
+            "provenance": "product-authored-v2",
+        }
+        for consumer in consumers
+    ]
+
+
+INFORMATION_FLOW_EDGES: List[Dict[str, str]] = [
+    *_flow_edges("GV.OC-01", "organizational_mission", ["GV.RM-01", "ID.AM-05", "ID.RA-04", "RC.RP-04"], "planning_input", "Use mission objectives to align the work with what the organization is trying to accomplish."),
+    *_flow_edges("GV.OC-02", "stakeholder_cybersecurity_needs", ["GV.RM-01", "GV.RM-05", "GV.SC-01", "RS.CO-02", "RS.CO-03", "RC.CO-03"], "planning_input", "Consider stakeholder cybersecurity and privacy needs when making this decision."),
+    *_flow_edges("GV.OC-02", "stakeholder_cybersecurity_needs", ["GV.SC-05"], "required_input", "Define supplier cybersecurity requirements that address identified stakeholder needs."),
+    *_flow_edges("External: legal, regulatory, and contractual sources", "external_legal_contractual_sources", ["GV.OC-03"], "required_input", "Identify the external requirements that constrain cybersecurity decisions."),
+    *_flow_edges("GV.OC-03", "legal_contractual_requirements", ["GV.PO-01", "GV.PO-02", "RS.CO-02", "RC.CO-04"], "planning_input", "Use applicable requirements when setting or maintaining the work."),
+    *_flow_edges("GV.OC-03", "legal_contractual_requirements", ["GV.SC-05"], "required_input", "Include applicable requirements in supplier cybersecurity requirements and agreements."),
+    *_flow_edges("GV.OC-04", "critical_services_and_objectives", ["ID.AM-05", "ID.RA-04", "PR.IR-03", "RC.CO-03"], "planning_input", "Use the importance of services and objectives to guide planning and decisions."),
+    *_flow_edges("GV.OC-04", "critical_services_and_objectives", ["RC.RP-02", "RC.RP-04"], "required_input", "Recovery priorities and verification must reflect the services and objectives that matter most."),
+    *_flow_edges("GV.OC-05", "external_dependencies", ["ID.AM-04", "GV.SC-04", "ID.RA-10", "DE.CM-06", "RC.RP-02", "GV.SC-10"], "planning_input", "Use known dependencies to plan and focus the work."),
+    *_flow_edges("GV.RM-01", "risk_management_objectives", ["GV.PO-01", "ID.RA-06", "GV.RR-03", "GV.RM-03", "GV.RM-07"], "planning_input", "Use agreed risk-management objectives to guide decisions and priorities."),
+    *_flow_edges("GV.RM-02", "risk_appetite_tolerance", ["GV.PO-01", "ID.RA-06", "GV.RM-03", "GV.RM-07"], "planning_input", "Use agreed risk boundaries when selecting and coordinating responses."),
+    *_flow_edges("GV.RM-04", "risk_response_direction", ["GV.PO-01", "ID.RA-06", "GV.RM-03"], "planning_input", "Use approved response direction when choosing and coordinating risk treatment."),
+    *_flow_edges("GV.RM-06", "risk_assessment_method", ["ID.RA-04", "ID.RA-05", "ID.RA-06", "ID.RA-07"], "planning_input", "Use the established method to make risk analysis and records consistent."),
+    *_flow_edges("External: measurement criteria", "risk_management_measurement_criteria", ["GV.OV-03"], "planning_input", "Use agreed measures and thresholds to evaluate risk-management performance."),
+    *_flow_edges("External: operational measurement and evidence records", "risk_management_performance_results", ["GV.OV-03"], "required_input", "Review actual performance results to determine whether adjustments are needed."),
+    *_flow_edges("GV.OV-03", "risk_management_review_findings", ["GV.OV-01", "GV.OV-02", "GV.PO-02"], "planning_input", "Use review findings when adjusting strategy, direction, and policy."),
+    *_flow_edges("GV.RR-02", "organization_cybersecurity_roles", ["RS.MA-01", "RC.RP-01"], "required_input", "Identify the internal roles responsible for response and recovery work."),
+    *_flow_edges("GV.SC-02", "supplier_third_party_roles", ["GV.SC-08"], "required_input", "Identify supplier and third-party participants in incident planning, response, and recovery."),
+    *_flow_edges("GV.SC-04", "supplier_criticality", ["GV.SC-05", "GV.SC-06", "GV.SC-07", "GV.SC-09"], "planning_input", "Focus requirements, assessment, monitoring, and lifecycle work on suppliers that matter most."),
+    *_flow_edges("GV.SC-04", "supplier_criticality", ["ID.RA-10"], "required_input", "Determine which suppliers require risk assessment before acquisition."),
+    *_flow_edges("GV.SC-05", "supplier_requirements_and_agreements", ["GV.SC-08", "GV.SC-10"], "planning_input", "Use supplier responsibilities and agreement terms to plan incident and transition work."),
+    *_flow_edges("GV.SC-01", "supply_chain_program_direction", ["GV.SC-03"], "required_input", "Integrate the established supply-chain risk program with cybersecurity and enterprise risk work."),
+    *_flow_edges("GV.SC-01", "supply_chain_program_direction", ["GV.SC-09"], "planning_input", "Apply the agreed supply-chain program direction across the life cycle."),
+    *_flow_edges("GV.SC-07", "supplier_lifecycle_results", ["GV.SC-03"], "required_input", "Bring supplier risk and monitoring results into cybersecurity and enterprise risk work."),
+    *_flow_edges("GV.SC-07", "supplier_lifecycle_results", ["GV.SC-09"], "planning_input", "Use lifecycle results to evaluate supply-chain practice performance."),
+    *_flow_edges("GV.SC-03", "integrated_supply_chain_risk_records", ["GV.RM-03"], "planning_input", "Escalate material supply-chain risks through enterprise risk management."),
+    *_flow_edges("ID.AM-01", "hardware_inventory", ["ID.RA-01", "ID.RA-09", "PR.PS-03", "DE.CM-09", "ID.AM-08"], "required_input", "Identify the managed hardware to which the work applies."),
+    *_flow_edges("ID.AM-02", "software_system_service_inventory", ["ID.RA-01", "ID.RA-09", "PR.PS-01", "PR.PS-02", "DE.CM-09", "ID.AM-08"], "required_input", "Identify the managed software, systems, and services to which the work applies."),
+    *_flow_edges("ID.AM-04", "supplier_service_inventory", ["GV.SC-10"], "planning_input", "Identify supplier-provided services that must be transitioned or retired."),
+    *_flow_edges("ID.AM-04", "supplier_service_inventory", ["ID.AM-08"], "required_input", "Manage known supplier-provided services through their life cycles."),
+    *_flow_edges("ID.AM-07", "data_inventory", ["DE.CM-09", "ID.AM-08"], "required_input", "Identify the data to be monitored and managed through its life cycle."),
+    *_flow_edges("ID.AM-03", "network_and_data_flows", ["PR.DS-02", "PR.IR-01", "DE.CM-01"], "planning_input", "Use known communication and data paths to plan protections and monitoring."),
+    *_flow_edges("ID.AM-05", "asset_criticality", ["ID.RA-04", "RC.RP-02", "ID.AM-08"], "planning_input", "Use asset importance and impact to prioritize the work."),
+    *_flow_edges("ID.RA-02", "threat_intelligence", ["ID.RA-03", "ID.RA-04"], "planning_input", "Use relevant threat intelligence to identify and analyze threats."),
+    *_flow_edges("ID.RA-02", "threat_intelligence", ["DE.AE-07"], "event_input", "Apply relevant threat intelligence as context during adverse-event analysis."),
+    *_flow_edges("ID.RA-03", "relevant_threat_records", ["ID.RA-04", "ID.RA-05"], "required_input", "Use relevant threats to analyze likelihood, impact, and inherent risk."),
+    *_flow_edges("ID.RA-01", "validated_vulnerability_records", ["ID.RA-04", "ID.RA-05"], "required_input", "Use validated weaknesses to analyze likelihood, impact, and inherent risk."),
+    *_flow_edges("External: vulnerability disclosure sources", "external_vulnerability_disclosures", ["ID.RA-08"], "event_input", "Receive and analyze external vulnerability disclosures."),
+    *_flow_edges("ID.RA-08", "validated_vulnerability_records", ["ID.RA-01"], "planning_input", "Validate and record vulnerabilities identified through disclosure and other sources."),
+    *_flow_edges("ID.RA-04", "likelihood_impact_analysis", ["ID.RA-05"], "required_input", "Use likelihood and impact analysis to determine inherent risk."),
+    *_flow_edges("ID.RA-04", "likelihood_impact_analysis", ["ID.RA-06", "GV.RM-03", "GV.RM-07"], "planning_input", "Use risk analysis to guide response, enterprise risk work, and opportunities."),
+    *_flow_edges("ID.RA-05", "prioritized_risk_records", ["ID.RA-06"], "required_input", "Choose and track risk responses for recorded, prioritized risks."),
+    *_flow_edges("ID.RA-05", "prioritized_risk_records", ["GV.RM-03", "GV.RM-07"], "planning_input", "Use prioritized risks to coordinate enterprise risk work and identify opportunities."),
+    *_flow_edges("ID.RA-06", "selected_risk_responses", ["PR.AA-05", "PR.DS-01", "PR.DS-02", "PR.DS-10", "PR.IR-03", "GV.RM-03"], "planning_input", "Implement and coordinate protections in accordance with selected risk responses."),
+    *_flow_edges("ID.RA-07", "change_and_exception_risk_records", ["ID.RA-06"], "planning_input", "Consider documented change and exception risks when selecting responses."),
+    *_flow_edges("PR.PS-04", "log_records", ["DE.CM-09"], "planning_input", "Make available log records useful for monitoring computing environments."),
+    *_flow_edges("DE.CM-01", "monitoring_findings", ["DE.AE-02", "DE.AE-03", "DE.AE-04", "DE.AE-08"], "event_input", "Use monitored potentially adverse events in event analysis and incident decisions."),
+    *_flow_edges("DE.CM-02", "monitoring_findings", ["DE.AE-02", "DE.AE-03", "DE.AE-04", "DE.AE-08"], "event_input", "Use monitored physical-environment events in event analysis and incident decisions."),
+    *_flow_edges("DE.CM-03", "monitoring_findings", ["DE.AE-02", "DE.AE-03", "DE.AE-04", "DE.AE-08"], "event_input", "Use personnel and technology-usage findings in event analysis and incident decisions."),
+    *_flow_edges("DE.CM-06", "monitoring_findings", ["DE.AE-02", "DE.AE-03", "DE.AE-04", "DE.AE-08"], "event_input", "Use external-provider monitoring findings in event analysis and incident decisions."),
+    *_flow_edges("DE.CM-09", "monitoring_findings", ["DE.AE-02", "DE.AE-03", "DE.AE-04", "DE.AE-08"], "event_input", "Use technology and data monitoring findings in event analysis and incident decisions."),
+    *_flow_edges("DE.AE-06", "authorized_adverse_event_alerts", ["DE.AE-08", "RS.MA-02"], "event_input", "Provide authorized staff and tools the alerts used for incident decisions and report validation."),
+    *_flow_edges("DE.AE-07", "event_threat_context", ["DE.AE-02", "DE.AE-04"], "event_input", "Use threat context to understand activity and estimate event impact and scope."),
+    *_flow_edges("DE.AE-02", "event_activity_analysis", ["RS.MA-02"], "event_input", "Use analyzed event activity to validate incident reports."),
+    *_flow_edges("DE.AE-04", "event_impact_scope", ["RS.MA-02"], "event_input", "Use estimated event impact and scope to validate incident reports."),
+    *_flow_edges("DE.AE-08", "declared_incident", ["RS.MA-01", "RS.MA-02", "RC.RP-01"], "event_input", "A declared incident initiates response, report validation, and recovery work."),
+    *_flow_edges("RS.AN-03", "incident_investigation_records", ["RS.MA-03", "RS.MI-01", "RS.MI-02", "RS.AN-06", "RS.AN-07", "RS.AN-08"], "event_input", "Use investigation and root-cause analysis to prioritize, contain, eradicate, preserve, and assess the incident."),
+    *_flow_edges("RS.AN-06", "preserved_investigation_records", ["RS.AN-07", "RS.AN-08"], "event_input", "Use preserved investigation records to maintain a complete, trustworthy incident record and assess its magnitude."),
+    *_flow_edges("RS.AN-08", "incident_scope_impact", ["RS.MA-03", "RS.MA-04", "RS.MA-05"], "event_input", "Use validated incident scope and impact to prioritize, escalate, and initiate recovery."),
+    *_flow_edges("RS.MA-02", "triaged_incident_reports", ["RS.MA-03"], "event_input", "Categorize and prioritize validated incident reports."),
+    *_flow_edges("RS.MA-03", "incident_priority", ["RS.MA-04"], "event_input", "Escalate incidents according to their established priority."),
+    *_flow_edges("RS.MA-03", "incident_scope_impact", ["RS.MA-05"], "event_input", "Apply recovery-initiation criteria using the prioritized incident and its validated scope."),
+    *_flow_edges("RS.MA-05", "recovery_initiation_decision", ["RC.RP-01"], "event_input", "Execute the recovery portion of the response plan once recovery is initiated."),
+    *_flow_edges("RC.RP-02", "recovery_priorities_actions", ["RC.RP-05", "RC.RP-06", "RC.CO-03"], "event_input", "Use selected recovery actions and priorities to restore, close, and communicate recovery work."),
+    *_flow_edges("PR.DS-11", "restoration_assets", ["RC.RP-03"], "event_input", "Verify restoration assets before they are used."),
+    *_flow_edges("RC.RP-03", "verified_restoration_assets", ["RC.RP-05"], "event_input", "Use verified restoration assets to restore systems and services."),
+    *_flow_edges("RC.RP-05", "restoration_verification_status", ["RC.RP-06", "RC.CO-03"], "event_input", "Use restoration verification and normal-operation status to close and communicate recovery."),
+    *_flow_edges("External: incident-response plan and coordination arrangements", "incident_response_plan_coordination", ["GV.SC-08", "RS.MA-01", "RC.RP-01"], "planning_input", "Use the plan and coordination arrangements to organize supplier, response, and recovery work."),
+    *_flow_edges("ID.IM-01", "improvement_lessons", ["GV.OV-01", "GV.OV-02", "GV.PO-02", "ID.IM-04"], "planning_input", "Use evaluation findings to improve strategy, policy, and plans."),
+    *_flow_edges("ID.IM-02", "improvement_lessons", ["GV.OV-01", "GV.OV-02", "GV.PO-02", "ID.IM-04"], "planning_input", "Use test and exercise findings to improve strategy, policy, and plans."),
+    *_flow_edges("ID.IM-03", "improvement_lessons", ["GV.OV-01", "GV.OV-02", "GV.PO-02", "ID.IM-04"], "planning_input", "Use operational and incident lessons to improve strategy, policy, and plans."),
+]
+
+
+# The v1 pooled items listed here are intentionally excluded from the runtime
+# catalog once the explicit v2 edge model is active.  The remaining original
+# items are still valid atomic items and are reused by v2 edges.
+_V1_POOLED_INFORMATION_ITEM_IDS = {
+    "risk_objectives_and_tolerance", "cybersecurity_roles", "asset_inventory",
+    "vulnerabilities_and_threats", "risk_scenarios_and_priorities",
+    "incident_analysis", "recovery_priorities_and_status",
+    "analyzed_event_information", "incident_priority_and_scope",
+    "incident_response_plan", "risk_management_measures_and_results",
+}
+
+INFORMATION_FLOW_CURRENT_ITEMS: List[Dict[str, str]] = [
+    item for item in INFORMATION_ITEMS
+    if item["information_id"] not in _V1_POOLED_INFORMATION_ITEM_IDS
+] + INFORMATION_FLOW_EDGE_ITEMS
